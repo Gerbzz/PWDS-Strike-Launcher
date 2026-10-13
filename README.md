@@ -6,10 +6,10 @@
 
 The launcher brings the Strike family into a single catalog. Browse each app's purpose and release status, and see a library designed to track verified installations when packaged releases exist.
 
-### Highlights
+## Highlights
 
 - Browse app cards with purpose and release status.
-- See development and release status across the suite.
+- Check each app's current development and release status.
 - Read the same catalog from the native UI or CLI.
 
 ## Current status
@@ -28,9 +28,9 @@ pwds-strike-launcher plan clipstrike
 
 `plan` currently reports that there is no verified platform release. Install, launch, update, and uninstall controls are disabled until verified artifacts and executors exist.
 
-## Release policy
+## Release readiness
 
-The catalog is a product list, not a release claim. A source repository or a shortcut to a local prototype never becomes an install button. The embedded release manifest is empty; stable app IDs remain unprefixed for future library-state compatibility. See [installation design](docs/INSTALL_DESIGN.md) for the planned verified-artifact contract.
+Current entries are source or development builds, with no accepted clean-machine installer or verified CI release artifact. The catalog is a product list, not a release claim: a source link or local prototype shortcut never enables installation. The embedded release manifest is empty; stable app IDs remain unprefixed for future library-state compatibility. See [installation design](docs/INSTALL_DESIGN.md) for the planned verified-artifact contract.
 
 ## Current implementation
 
