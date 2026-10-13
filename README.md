@@ -1,8 +1,24 @@
 # PWDS Strike Launcher
 
-**Source foundation, not a downloadable launcher or app installer.** PWDS is the suite publisher brand. Product names remain ClipStrike, DemoStrike, StreamStrike, and so on. No app is marked installable today: [`releases.json`](releases.json) intentionally has no releases, and there is no download, extraction, activation, launch, update, or uninstall executor.
+**by PWDS**
 
-The native Rust UI source opens with prominent **PWDS Strike Launcher** branding, a catalog and a library. Each card shows its product name, purpose, release status, and a clearly marked **Logo pending** slot. The app sources inspected so far did not expose approved first-party logo assets to embed. The controls for install, launch, update and uninstall are disabled until real implementations and release evidence exist. The CLI reads the same catalog and installed-state model:
+**The Strike apps in one place.**
+
+The launcher brings the Strike family into a single catalog. Browse each app's purpose and release status, and see a library designed to track verified installations when packaged releases exist.
+
+### Highlights
+
+- Browse app cards with purpose and release status.
+- See which apps are available and which are still in development.
+- Read the same catalog from the native UI or CLI.
+
+## Current status
+
+Source foundation, not a downloadable launcher. The release manifest is empty, so all apps currently show as coming soon. There is no download, install, launch, update, or uninstall executor; those controls remain disabled.
+
+## Browse the catalog
+
+The native Rust UI source has a catalog and library. Each card shows an app's name, purpose, release status, and a **Logo pending** slot where no approved asset is embedded. The CLI reads the same catalog and installed-state model:
 
 ```text
 pwds-strike-launcher catalog
@@ -10,7 +26,7 @@ pwds-strike-launcher library
 pwds-strike-launcher plan clipstrike
 ```
 
-`plan` currently returns “No verified release for this platform; coming soon.” A `native-ui` Cargo feature contains the egui/eframe UI, consistent with the existing Rust suite prototypes. No mandatory account, server, paid service, or remote telemetry is part of this source.
+`plan` currently reports that there is no verified platform release. Install, launch, update, and uninstall controls are disabled until verified artifacts and executors exist.
 
 ## What was found locally
 
