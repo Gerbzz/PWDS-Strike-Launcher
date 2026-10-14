@@ -1,6 +1,11 @@
 # PWDS Strike Launcher
 
-**by PWDS**
+<p align="center">
+  <a href="https://prowebdevsolutions.com"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/branding/PWDS-logo-orange.svg">
+    <img src="assets/branding/PWDS-logo.png" alt="PWDS company logo" width="120">
+  </picture></a>
+</p>
 
 **The Strike apps in one place.**
 
@@ -44,3 +49,7 @@ Current entries are source or development builds, with no accepted clean-machine
 Source formatting and offline Cargo metadata checks passed. Compilation, visible UI review, and clean-machine installation remain outstanding. A source test alone would not verify the planned install or update flow.
 
 The next functional milestone is one properly licensed and packaged Windows release with a pinned artifact, a bounded downloader and safe ZIP extraction into same-volume staging, atomic activation and recovery, then a clean-machine install/update/uninstall test. User documents and settings must stay outside versioned app directories and remain after uninstall by default.
+
+## PWDS brand artwork
+
+The company mark in this masthead is the existing [official PWDS logo](https://github.com/Gerbzz/PWDS-Website/blob/main/public/prowebdevsolutions-logo.png), with the [official orange display asset](https://prowebdevsolutions.com/images/prowebdevsolutions-logo-orange.svg) for dark backgrounds. Any app logo above it remains the original Strike suite artwork.
