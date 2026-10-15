@@ -110,6 +110,12 @@ impl InstallRoot {
     /// An interrupted state-file swap restores the last complete receipt file.
     pub fn recover(&self) -> Result<(), String> {
         let _lock = self.operation_lock()?;
+        self.recover_locked()
+    }
+
+    /// Every operation that can change installed state calls this while holding the root lock.
+    /// A reused UI root must observe the same pending journal as a newly opened root.
+    fn recover_locked(&self) -> Result<(), String> {
         let state = self.state_path();
         let backup = self.backup_path();
         if !state.exists() && backup.exists() {
@@ -256,6 +262,7 @@ impl InstallRoot {
         progress: &mut dyn FnMut(Phase) -> bool,
     ) -> Result<(), String> {
         let _lock = self.operation_lock()?;
+        self.recover_locked()?;
         let release = plan.release;
         validate_release_payload(release)?;
         if (release.platform.as_str(), release.arch.as_str()) != current_target() {
@@ -349,6 +356,7 @@ impl InstallRoot {
     ) -> Result<(), String> {
         let release = plan.release;
         validate_release(release)?;
+        self.recover()?;
         if !progress(Phase::Downloading) {
             return Err("installation cancelled".into());
         }
@@ -429,6 +437,12 @@ impl InstallRoot {
     }
 
     pub fn entrypoint(&self, id: &str) -> Result<PathBuf, String> {
+        let _lock = self.operation_lock()?;
+        self.recover_locked()?;
+        self.verified_entrypoint(id)
+    }
+
+    fn verified_entrypoint(&self, id: &str) -> Result<PathBuf, String> {
         let state = self.state()?;
         let receipt = state.receipt(id).ok_or("app is not installed")?;
         self.verify_receipt(receipt)?;
@@ -436,13 +450,16 @@ impl InstallRoot {
     }
 
     pub fn launch(&self, id: &str, args: &[String]) -> Result<u32, String> {
-        let entry = self.entrypoint(id)?;
+        let lock = self.operation_lock()?;
+        self.recover_locked()?;
+        let entry = self.verified_entrypoint(id)?;
         let working_dir = entry.parent().ok_or("invalid entrypoint")?;
-        match Command::new(&entry)
+        let result = Command::new(&entry)
             .args(args)
             .current_dir(working_dir)
-            .spawn()
-        {
+            .spawn();
+        drop(lock);
+        match result {
             Ok(child) => Ok(child.id()),
             Err(error) => {
                 // A failed first launch can be reversed when a previous receipt is available.
@@ -456,6 +473,7 @@ impl InstallRoot {
 
     pub fn rollback(&self, id: &str) -> Result<(), String> {
         let _lock = self.operation_lock()?;
+        self.recover_locked()?;
         let mut state = self.state()?;
         let current = state.receipt(id).cloned().ok_or("app is not installed")?;
         let previous_index = state
@@ -485,16 +503,17 @@ impl InstallRoot {
     }
 
     pub fn uninstall(&self, id: &str) -> Result<(), String> {
-        self.uninstall_impl(id, &mut |_| Ok(()))
+        self.uninstall_impl(id, &mut |_| Ok(()), &mut || Ok(()))
     }
 
     fn uninstall_impl(
         &self,
         id: &str,
         after_park: &mut dyn FnMut(usize) -> Result<(), String>,
+        before_cleanup: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<(), String> {
         let _lock = self.operation_lock()?;
-        self.recover_uninstall()?;
+        self.recover_locked()?;
         let mut state = self.state()?;
         let receipt = state.receipt(id).ok_or("app is not installed")?.clone();
         self.verify_receipt(&receipt)?;
@@ -556,6 +575,7 @@ impl InstallRoot {
         }
         // A committed uninstall has no active receipt. Recovery verifies each parked inventory
         // again before deletion, and retains its journal if cleanup is interrupted.
+        before_cleanup()?;
         self.recover_uninstall()
     }
 
@@ -884,6 +904,7 @@ mod redirect_tests {
 mod uninstall_transaction_tests {
     use super::*;
     use tempfile::TempDir;
+    use zip::{ZipWriter, write::SimpleFileOptions};
 
     fn fixture() -> (TempDir, InstallRoot) {
         let tmp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
@@ -918,17 +939,64 @@ mod uninstall_transaction_tests {
         (tmp, root)
     }
 
+    fn reinstall_package(tmp: &TempDir) -> (PathBuf, crate::Release) {
+        let path = tmp.path().join("reinstall.zip");
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        zip.start_file("gridstrike.exe", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"fresh").unwrap();
+        zip.finish().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        (
+            path,
+            crate::Release {
+                app_id: "gridstrike".into(),
+                version: "2.0.0".into(),
+                platform: std::env::consts::OS.into(),
+                arch: std::env::consts::ARCH.into(),
+                artifact_url: String::new(),
+                artifact_sha256: format!("{:x}", Sha256::digest(&bytes)),
+                artifact_bytes: bytes.len() as u64,
+                entrypoint: "gridstrike.exe".into(),
+            },
+        )
+    }
+
+    fn park_current_before_commit(root: &InstallRoot) -> Receipt {
+        let receipt = root.state().unwrap().receipt("gridstrike").unwrap().clone();
+        let parked_name = ".uninstall-interrupted";
+        root.write_uninstall_journal(&UninstallJournal {
+            schema: 1,
+            app_id: "gridstrike".into(),
+            versions: vec![ParkedVersion {
+                receipt: receipt.clone(),
+                parked_name: parked_name.into(),
+            }],
+        })
+        .unwrap();
+        fs::rename(
+            root.version_path(&receipt).unwrap(),
+            root.app_path("gridstrike").unwrap().join(parked_name),
+        )
+        .unwrap();
+        receipt
+    }
+
     #[test]
     fn failure_after_first_park_restores_every_version() {
         let (_tmp, root) = fixture();
         let error = root
-            .uninstall_impl("gridstrike", &mut |count| {
-                if count == 1 {
-                    Err("injected parking failure".into())
-                } else {
-                    Ok(())
-                }
-            })
+            .uninstall_impl(
+                "gridstrike",
+                &mut |count| {
+                    if count == 1 {
+                        Err("injected parking failure".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+                &mut || Ok(()),
+            )
             .unwrap_err();
         assert!(error.contains("injected parking failure"));
         assert_eq!(
@@ -959,20 +1027,11 @@ mod uninstall_transaction_tests {
     #[test]
     fn reopening_restores_versions_parked_before_receipt_commit() {
         let (tmp, root) = fixture();
-        let state = root.state().unwrap();
-        let receipt = state.receipt("gridstrike").unwrap().clone();
-        let parked_name = ".uninstall-interrupted";
-        let parked = root.app_path("gridstrike").unwrap().join(parked_name);
-        root.write_uninstall_journal(&UninstallJournal {
-            schema: 1,
-            app_id: "gridstrike".into(),
-            versions: vec![ParkedVersion {
-                receipt: receipt.clone(),
-                parked_name: parked_name.into(),
-            }],
-        })
-        .unwrap();
-        fs::rename(root.version_path(&receipt).unwrap(), &parked).unwrap();
+        park_current_before_commit(&root);
+        let parked = root
+            .app_path("gridstrike")
+            .unwrap()
+            .join(".uninstall-interrupted");
 
         let reopened = InstallRoot::open(&tmp.path().join("launcher")).unwrap();
         assert_eq!(
@@ -984,6 +1043,46 @@ mod uninstall_transaction_tests {
         assert_eq!(
             fs::read(reopened.path.join("user-project.txt")).unwrap(),
             b"keep"
+        );
+    }
+
+    #[test]
+    fn same_root_rollback_recovers_parked_current_version_first() {
+        let (_tmp, root) = fixture();
+        park_current_before_commit(&root);
+        root.rollback("gridstrike").unwrap();
+        assert!(!root.uninstall_journal_path().exists());
+        assert_eq!(
+            root.state().unwrap().receipt("gridstrike").unwrap().version,
+            "1.0.0"
+        );
+        assert_eq!(
+            fs::read(root.entrypoint("gridstrike").unwrap()).unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            fs::read(root.path.join("apps/gridstrike/2.0.0/gridstrike.exe")).unwrap(),
+            b"two"
+        );
+    }
+
+    #[test]
+    fn same_root_launch_recovers_parked_receipt_before_starting_process() {
+        let (_tmp, root) = fixture();
+        let mut state = root.state().unwrap();
+        state.retained.clear();
+        root.commit(&state).unwrap();
+        park_current_before_commit(&root);
+        let error = root.launch("gridstrike", &[]).unwrap_err();
+        assert!(error.contains("launch failed"), "{error}");
+        assert!(!root.uninstall_journal_path().exists());
+        assert_eq!(
+            root.state().unwrap().receipt("gridstrike").unwrap().version,
+            "2.0.0"
+        );
+        assert_eq!(
+            fs::read(root.path.join("apps/gridstrike/2.0.0/gridstrike.exe")).unwrap(),
+            b"two"
         );
     }
 
@@ -1055,5 +1154,88 @@ mod uninstall_transaction_tests {
             fs::read(reopened.path.join("user-project.txt")).unwrap(),
             b"keep"
         );
+    }
+
+    #[test]
+    fn same_root_reinstall_finishes_partially_failed_committed_uninstall() {
+        let (tmp, root) = fixture();
+        let error = root
+            .uninstall_impl("gridstrike", &mut |_| Ok(()), &mut || {
+                let journal = root.read_uninstall_journal()?.unwrap();
+                let parked = root
+                    .app_path("gridstrike")?
+                    .join(&journal.versions.last().unwrap().parked_name);
+                fs::remove_dir_all(parked).map_err(|e| e.to_string())?;
+                Err("injected partial cleanup failure".into())
+            })
+            .unwrap_err();
+        assert!(error.contains("injected partial cleanup failure"));
+        assert!(root.state().unwrap().receipt("gridstrike").is_none());
+        assert!(root.uninstall_journal_path().exists());
+
+        let (archive, release) = reinstall_package(&tmp);
+        root.install_archive(
+            &InstallPlan {
+                release: &release,
+                is_update: false,
+            },
+            &archive,
+            &mut |_| true,
+        )
+        .unwrap();
+        assert!(!root.uninstall_journal_path().exists());
+        assert_eq!(
+            fs::read(root.entrypoint("gridstrike").unwrap()).unwrap(),
+            b"fresh"
+        );
+        let reopened = InstallRoot::open(&tmp.path().join("launcher")).unwrap();
+        assert_eq!(
+            fs::read(reopened.entrypoint("gridstrike").unwrap()).unwrap(),
+            b"fresh"
+        );
+        assert_eq!(
+            fs::read(reopened.path.join("user-project.txt")).unwrap(),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn same_root_blocks_reinstall_while_committed_cleanup_contains_unowned_data() {
+        let (tmp, root) = fixture();
+        let error = root
+            .uninstall_impl("gridstrike", &mut |_| Ok(()), &mut || {
+                let journal = root.read_uninstall_journal()?.unwrap();
+                let parked = root
+                    .app_path("gridstrike")?
+                    .join(&journal.versions[0].parked_name);
+                fs::write(parked.join("user-project.txt"), b"keep").map_err(|e| e.to_string())?;
+                Err("injected cleanup failure".into())
+            })
+            .unwrap_err();
+        assert!(error.contains("injected cleanup failure"));
+        let (archive, release) = reinstall_package(&tmp);
+        let install = root.install_archive(
+            &InstallPlan {
+                release: &release,
+                is_update: false,
+            },
+            &archive,
+            &mut |_| true,
+        );
+        assert!(install.is_err(), "install must wait for journal recovery");
+        assert!(root.state().unwrap().receipt("gridstrike").is_none());
+        assert!(!root.path.join("apps/gridstrike/2.0.0").exists());
+        assert!(root.uninstall_journal_path().exists());
+        assert!(InstallRoot::open(&tmp.path().join("launcher")).is_err());
+        let journal = root.read_uninstall_journal().unwrap().unwrap();
+        let parked = root
+            .app_path("gridstrike")
+            .unwrap()
+            .join(&journal.versions[0].parked_name);
+        assert_eq!(fs::read(parked.join("user-project.txt")).unwrap(), b"keep");
+        fs::remove_file(parked.join("user-project.txt")).unwrap();
+        let reopened = InstallRoot::open(&tmp.path().join("launcher")).unwrap();
+        assert!(!reopened.uninstall_journal_path().exists());
+        assert!(reopened.state().unwrap().receipt("gridstrike").is_none());
     }
 }
