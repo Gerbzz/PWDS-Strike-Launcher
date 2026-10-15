@@ -12,49 +12,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  capture:
+  build-windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: '0'
       RUSTFLAGS: -C debuginfo=0
     steps:
       - uses: actions/checkout@v4
-      - name: Check toolchain
+      - name: Build the exact branch source on Windows
         shell: pwsh
+        run: cargo build --locked --features native-ui --bin pwds-strike-launcher-ui
+
+  capture-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: -C debuginfo=0
+      LIBGL_ALWAYS_SOFTWARE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check software display
+        shell: bash
         run: |
           rustc --version
           cargo --version
+          command -v xvfb-run
       - name: Build the exact branch source
-        shell: pwsh
+        shell: bash
         run: cargo build --locked --features native-ui --bin pwds-strike-launcher-ui
-      - name: Capture actual native pages
-        shell: pwsh
+      - name: Capture actual native pages in a virtual display
+        shell: bash
         run: |
-          $preview = Join-Path $env:RUNNER_TEMP 'launcher-preview'
-          New-Item -ItemType Directory -Path $preview -ErrorAction Stop | Out-Null
-          $app = Join-Path (Get-Location) 'target\debug\pwds-strike-launcher-ui.exe'
-          & $app --capture catalog (Join-Path $preview 'launcher-catalog.png')
-          if ($LASTEXITCODE -ne 0) { throw 'Catalog capture failed' }
-          & $app --capture library (Join-Path $preview 'launcher-library.png')
-          if ($LASTEXITCODE -ne 0) { throw 'Library capture failed' }
-          foreach ($name in @('launcher-catalog.png', 'launcher-library.png')) {
-            $path = Join-Path $preview $name
-            $file = Get-Item -LiteralPath $path -ErrorAction Stop
-            if ($file.Length -lt 10000 -or $file.Length -gt 8MB) {
-              throw "$name has an unexpected size: $($file.Length) bytes"
-            }
-            $bytes = [System.IO.File]::ReadAllBytes($path)
-            $signature = [byte[]](137,80,78,71,13,10,26,10)
-            for ($i = 0; $i -lt $signature.Length; $i++) {
-              if ($bytes[$i] -ne $signature[$i]) { throw "$name is not a PNG" }
-            }
-          }
-          "source_commit=$env:GITHUB_SHA" | Set-Content -LiteralPath (Join-Path $preview 'provenance.txt')
-          "capture=egui native Screenshot event; bundled empty release manifest and runner-local installed state" | Add-Content -LiteralPath (Join-Path $preview 'provenance.txt')
+          set -euo pipefail
+          preview="$RUNNER_TEMP/launcher-preview"
+          mkdir -p "$preview"
+          xvfb-run -a target/debug/pwds-strike-launcher-ui --capture catalog "$preview/launcher-catalog.png"
+          xvfb-run -a target/debug/pwds-strike-launcher-ui --capture library "$preview/launcher-library.png"
+          for name in launcher-catalog.png launcher-library.png; do
+            path="$preview/$name"
+            size=$(stat -c %s "$path")
+            test "$size" -gt 10000
+            test "$size" -lt 8388608
+            file "$path" | grep -q 'PNG image data'
+          done
+          printf 'source_commit=%s\ncapture=egui native Screenshot event; Linux Xvfb with Mesa software OpenGL\nstate=bundled empty release manifest and runner-local installed state\n' "$GITHUB_SHA" > "$preview/provenance.txt"
       - uses: actions/upload-artifact@v4
         with:
-          name: launcher-native-preview-${{ github.sha }}
+          name: launcher-linux-native-preview-${{ github.sha }}
           path: ${{ runner.temp }}/launcher-preview/
           if-no-files-found: error
           retention-days: 1

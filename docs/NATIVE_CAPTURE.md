@@ -8,11 +8,14 @@ WGPU adapter can attempt the same egui UI. Normal launch keeps WGPU. A missing s
 returns a nonzero exit code. Running without arguments opens the ordinary UI.
 
 The [native preview workflow](../.github/workflows/native-preview.yml) builds
-the pushed branch on a standard Windows GitHub-hosted runner. It captures both
-pages from the bundled empty release manifest and the runner's fresh local
-installed state, checks PNG signatures and size, and retains the images and
-source commit in a short-lived artifact. It does not publish either image to
-the README automatically.
+the pushed branch on a standard Windows GitHub-hosted runner. That hosted
+Windows session has no usable WGPU adapter and only OpenGL 1.1, so the
+workflow captures on a separate standard Linux runner with Xvfb and software
+OpenGL. It captures both pages from the bundled empty release manifest and
+the runner's fresh local installed state, checks PNG signatures and size, and
+retains the images and source commit in a short-lived artifact. It does not
+publish either image to the README automatically. Any published image must
+be labeled as a Linux virtual-display capture.
 
 Before publication, download that artifact, inspect both actual images, check
 the run's source SHA and labels, and record the final files' hashes. The
