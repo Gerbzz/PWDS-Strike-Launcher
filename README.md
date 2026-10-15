@@ -21,6 +21,16 @@ These are inspected captures of the real Rust/egui launcher window from [draft P
 
 The bundled release manifest and capture runner's installed state were empty. The catalog shows unavailable installation controls, and the library shows no launcher-managed apps. See the [capture provenance](docs/screenshots/README.md) for the build run and file hashes.
 
+### Installer development preview
+
+The current Rust installer was also exercised with a real GridStrike 0.5.0 package built on a [standard Windows runner](https://github.com/Gerbzz/PWDS-Strike-Launcher/actions/runs/38778010775). These fresh native Office PC captures show the isolated development-preview library before and after uninstall. They do not represent a public release.
+
+![Native launcher library with verified GridStrike 0.5.0 installed](docs/screenshots/installer-gridstrike-preview-installed.png)
+
+![Native launcher library after GridStrike preview uninstall](docs/screenshots/installer-gridstrike-preview-uninstalled.png)
+
+See the [installer capture provenance](docs/screenshots/README.md#installer-development-preview) for the exact package hash, source commit, and test boundary.
+
 ## Highlights
 
 - Browse app cards with purpose and release status.
