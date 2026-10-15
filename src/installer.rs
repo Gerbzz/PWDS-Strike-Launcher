@@ -3,6 +3,7 @@ use crate::{
     InstallPlan, InstalledFile, InstalledState, Receipt, app, current_target, validate_entrypoint,
     validate_release, validate_release_payload, verify_artifact,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
@@ -17,6 +18,20 @@ use zip::ZipArchive;
 
 const MAX_ENTRIES: usize = 20_000;
 const MAX_UNPACKED: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_UNINSTALL_JOURNAL_BYTES: u64 = 2 * 1024 * 1024;
+
+#[derive(Clone, Deserialize, Serialize)]
+struct ParkedVersion {
+    receipt: Receipt,
+    parked_name: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct UninstallJournal {
+    schema: u32,
+    app_id: String,
+    versions: Vec<ParkedVersion>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -63,6 +78,9 @@ impl InstallRoot {
     fn backup_path(&self) -> PathBuf {
         self.path.join("installed.backup.json")
     }
+    fn uninstall_journal_path(&self) -> PathBuf {
+        self.path.join("uninstall-journal.json")
+    }
     fn operation_lock(&self) -> Result<File, String> {
         let file = OpenOptions::new()
             .read(true)
@@ -99,7 +117,103 @@ impl InstallRoot {
             InstalledState::load(&backup)?;
             fs::rename(&backup, &state).map_err(|e| format!("restore installed state: {e}"))?;
         }
-        self.state().map(|_| ())
+        self.state()?;
+        self.recover_uninstall()
+    }
+
+    fn validate_uninstall_journal(&self, journal: &UninstallJournal) -> Result<(), String> {
+        if journal.schema != 1 || app(&journal.app_id).is_none() || journal.versions.is_empty() {
+            return Err("invalid uninstall journal".into());
+        }
+        let mut versions = HashSet::new();
+        let mut names = HashSet::new();
+        for item in &journal.versions {
+            if item.receipt.app_id != journal.app_id
+                || !versions.insert(item.receipt.version.as_str())
+                || !item.parked_name.starts_with(".uninstall-")
+                || !names.insert(item.parked_name.as_str())
+            {
+                return Err("invalid uninstall journal entry".into());
+            }
+            validate_entrypoint(&item.parked_name)?;
+            if item.parked_name.contains('/') {
+                return Err("invalid uninstall parking name".into());
+            }
+            self.version_path(&item.receipt)?;
+        }
+        Ok(())
+    }
+
+    fn write_uninstall_journal(&self, journal: &UninstallJournal) -> Result<(), String> {
+        self.validate_uninstall_journal(journal)?;
+        let path = self.uninstall_journal_path();
+        if path_occupied(&path)? {
+            return Err("unfinished uninstall requires recovery".into());
+        }
+        let bytes = serde_json::to_vec(journal).map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > MAX_UNINSTALL_JOURNAL_BYTES {
+            return Err("uninstall journal exceeds 2 MiB".into());
+        }
+        let mut temp = NamedTempFile::new_in(&self.path).map_err(|e| e.to_string())?;
+        temp.write_all(&bytes).map_err(|e| e.to_string())?;
+        temp.as_file_mut().sync_all().map_err(|e| e.to_string())?;
+        fs::rename(temp.into_temp_path(), &path)
+            .map_err(|e| format!("commit uninstall journal: {e}"))
+    }
+
+    fn read_uninstall_journal(&self) -> Result<Option<UninstallJournal>, String> {
+        let path = self.uninstall_journal_path();
+        if !path_occupied(&path)? {
+            return Ok(None);
+        }
+        guard_file(&path)?;
+        if fs::metadata(&path).map_err(|e| e.to_string())?.len() > MAX_UNINSTALL_JOURNAL_BYTES {
+            return Err("uninstall journal exceeds 2 MiB".into());
+        }
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        let journal: UninstallJournal = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("invalid uninstall journal: {e}"))?;
+        self.validate_uninstall_journal(&journal)?;
+        Ok(Some(journal))
+    }
+
+    fn recover_uninstall(&self) -> Result<(), String> {
+        let Some(journal) = self.read_uninstall_journal()? else {
+            return Ok(());
+        };
+        let still_installed = self.state()?.receipt(&journal.app_id).is_some();
+        let app_dir = self.app_path(&journal.app_id)?;
+        for item in journal.versions.iter().rev() {
+            let target = self.version_path(&item.receipt)?;
+            let parked = app_dir.join(&item.parked_name);
+            let target_exists = path_occupied(&target)?;
+            let parked_exists = path_occupied(&parked)?;
+            if still_installed {
+                match (target_exists, parked_exists) {
+                    (false, true) => {
+                        guard_dir(&parked)?;
+                        fs::rename(&parked, &target)
+                            .map_err(|e| format!("restore parked app version: {e}"))?;
+                    }
+                    (true, false) => {}
+                    _ => return Err("uninstall recovery found conflicting version paths".into()),
+                }
+                self.verify_receipt(&item.receipt)?;
+            } else if parked_exists {
+                if target_exists {
+                    return Err("uninstall cleanup found conflicting version paths".into());
+                }
+                // remove_dir_all can stop after deleting some owned files. In that case
+                // only remaining verified files may be removed on the next opening.
+                self.verify_remaining_inventory(&parked, &item.receipt)?;
+                fs::remove_dir_all(&parked)
+                    .map_err(|e| format!("complete interrupted uninstall: {e}"))?;
+            } else if target_exists {
+                return Err("uninstall cleanup found an unowned version directory".into());
+            }
+        }
+        fs::remove_file(self.uninstall_journal_path())
+            .map_err(|e| format!("finish uninstall recovery: {e}"))
     }
 
     pub fn state(&self) -> Result<InstalledState, String> {
@@ -166,9 +280,6 @@ impl InstallRoot {
         fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
         guard_dir(&app_dir)?;
         let target = app_dir.join(&release.version);
-        if target.exists() {
-            return Err("version directory already exists".into());
-        }
         if !progress(Phase::Extracting) {
             return Err("installation cancelled".into());
         }
@@ -182,9 +293,6 @@ impl InstallRoot {
         }
         let staged_entry = stage.path().join(&release.entrypoint);
         guard_file(&staged_entry)?;
-        if !progress(Phase::Activating) {
-            return Err("installation cancelled".into());
-        }
         let receipt = Receipt {
             app_id: release.app_id.clone(),
             version: release.version.clone(),
@@ -193,14 +301,34 @@ impl InstallRoot {
             entrypoint: release.entrypoint.clone(),
             files,
         };
-        let staged_path = stage.keep();
-        fs::rename(&staged_path, &target)
-            .map_err(|e| format!("activate version directory: {e}"))?;
+        self.verify_inventory(stage.path(), &receipt)?;
+        state
+            .retained
+            .retain(|old| !(old.app_id == release.app_id && old.version == release.version));
         if let Some(old) = state.receipt(&release.app_id).cloned() {
             state.retained.push(old);
         }
         state.installed.retain(|r| r.app_id != release.app_id);
-        state.installed.push(receipt);
+        state.installed.push(receipt.clone());
+        // The state loader enforces the same 1 MiB limit. Check the complete new receipt before
+        // a version directory can become visible, including when reusing an interrupted stage.
+        state.validate()?;
+        if !progress(Phase::Activating) {
+            return Err("installation cancelled".into());
+        }
+        // A process may have stopped after the version-directory rename but before committing
+        // its receipt. Never delete that directory: adopt it on retry only when every file
+        // matches the newly verified archive. The same check permits reactivating a retained
+        // version after a user-initiated rollback.
+        match fs::symlink_metadata(&target) {
+            Ok(_) => self.verify_receipt(&receipt)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let staged_path = stage.keep();
+                fs::rename(&staged_path, &target)
+                    .map_err(|e| format!("activate version directory: {e}"))?;
+            }
+            Err(error) => return Err(format!("inspect version directory: {error}")),
+        }
         if let Err(error) = self.commit(&state) {
             // No receipt points to the new version; keep the directory for inspection.
             return Err(format!(
@@ -318,7 +446,7 @@ impl InstallRoot {
             Ok(child) => Ok(child.id()),
             Err(error) => {
                 // A failed first launch can be reversed when a previous receipt is available.
-                if self.backup_path().exists() {
+                if self.can_rollback(id) {
                     let _ = self.rollback(id);
                 }
                 Err(format!("launch failed: {error}"))
@@ -328,39 +456,45 @@ impl InstallRoot {
 
     pub fn rollback(&self, id: &str) -> Result<(), String> {
         let _lock = self.operation_lock()?;
-        let mut old = InstalledState::load(&self.backup_path())?;
-        let receipt = old.receipt(id).ok_or("no previous installed version")?;
-        let current = self
-            .state()?
-            .receipt(id)
-            .cloned()
-            .ok_or("app is not installed")?;
-        if receipt.version == current.version {
-            return Err("no distinct previous version".into());
-        }
-        self.verify_receipt(receipt)?;
-        old.retained
-            .retain(|r| !(r.app_id == id && r.version == current.version));
-        old.retained.push(current);
-        self.commit(&old)
+        let mut state = self.state()?;
+        let current = state.receipt(id).cloned().ok_or("app is not installed")?;
+        let previous_index = state
+            .retained
+            .iter()
+            .rposition(|r| r.app_id == id && r.version != current.version)
+            .ok_or("no distinct previous version")?;
+        self.verify_receipt(&state.retained[previous_index])?;
+        let previous = state.retained.remove(previous_index);
+        state.retained.push(current);
+        state.installed.retain(|r| r.app_id != id);
+        state.installed.push(previous);
+        self.commit(&state)
     }
 
     pub fn can_rollback(&self, id: &str) -> bool {
-        InstalledState::load(&self.backup_path())
-            .ok()
-            .and_then(|s| s.receipt(id).cloned())
-            .is_some_and(|r| {
-                self.state()
-                    .ok()
-                    .and_then(|state| state.receipt(id).cloned())
-                    .is_some_and(|current| {
-                        current.version != r.version && self.verify_receipt(&r).is_ok()
-                    })
+        self.state().ok().is_some_and(|state| {
+            state.receipt(id).is_some_and(|current| {
+                state
+                    .retained
+                    .iter()
+                    .rev()
+                    .find(|r| r.app_id == id && r.version != current.version)
+                    .is_some_and(|previous| self.verify_receipt(previous).is_ok())
             })
+        })
     }
 
     pub fn uninstall(&self, id: &str) -> Result<(), String> {
+        self.uninstall_impl(id, &mut |_| Ok(()))
+    }
+
+    fn uninstall_impl(
+        &self,
+        id: &str,
+        after_park: &mut dyn FnMut(usize) -> Result<(), String>,
+    ) -> Result<(), String> {
         let _lock = self.operation_lock()?;
+        self.recover_uninstall()?;
         let mut state = self.state()?;
         let receipt = state.receipt(id).ok_or("app is not installed")?.clone();
         self.verify_receipt(&receipt)?;
@@ -379,54 +513,72 @@ impl InstallRoot {
             }
         }
         let app_dir = self.app_path(id)?;
-        let mut parked_versions = Vec::new();
+        let mut journal = UninstallJournal {
+            schema: 1,
+            app_id: id.to_string(),
+            versions: Vec::new(),
+        };
+        // Reserve every parking name before moving the first installed version. A later
+        // allocation failure therefore cannot strand an already parked version.
         for owned_receipt in &owned {
-            let target = self.version_path(owned_receipt)?;
             let parked = Builder::new()
                 .prefix(".uninstall-")
                 .tempdir_in(&app_dir)
                 .map_err(|e| e.to_string())?;
             let parked_path = parked.keep();
             fs::remove_dir(&parked_path).map_err(|e| e.to_string())?;
-            if let Err(error) = fs::rename(&target, &parked_path) {
-                for (target, parked) in parked_versions.iter().rev() {
-                    let _ = fs::rename(parked, target);
-                }
-                return Err(format!("park installed files: {error}"));
+            journal.versions.push(ParkedVersion {
+                receipt: owned_receipt.clone(),
+                parked_name: parked_path
+                    .file_name()
+                    .ok_or("invalid uninstall parking path")?
+                    .to_string_lossy()
+                    .into_owned(),
+            });
+        }
+        self.write_uninstall_journal(&journal)?;
+        let operation = (|| {
+            for (index, item) in journal.versions.iter().enumerate() {
+                let target = self.version_path(&item.receipt)?;
+                let parked = app_dir.join(&item.parked_name);
+                fs::rename(&target, &parked).map_err(|e| format!("park installed files: {e}"))?;
+                after_park(index + 1)?;
             }
-            parked_versions.push((target, parked_path));
+            state.installed.retain(|r| r.app_id != id);
+            state.retained.retain(|r| r.app_id != id);
+            self.commit(&state)
+        })();
+        if let Err(error) = operation {
+            return match self.recover_uninstall() {
+                Ok(()) => Err(error),
+                Err(recovery) => Err(format!("{error}; uninstall recovery pending: {recovery}")),
+            };
         }
-        state.installed.retain(|r| r.app_id != id);
-        state.retained.retain(|r| r.app_id != id);
-        if let Err(error) = self.commit(&state) {
-            for (target, parked) in parked_versions.iter().rev() {
-                let _ = fs::rename(parked, target);
-            }
-            return Err(error);
-        }
-        // Only fully inventoried, launcher-owned version directories are removed.
-        for (_, parked) in parked_versions {
-            fs::remove_dir_all(&parked).map_err(|e| {
-                format!("uninstalled; cleanup remains at {}: {e}", parked.display())
-            })?;
-        }
-        Ok(())
+        // A committed uninstall has no active receipt. Recovery verifies each parked inventory
+        // again before deletion, and retains its journal if cleanup is interrupted.
+        self.recover_uninstall()
     }
 
     fn verify_receipt(&self, receipt: &Receipt) -> Result<(), String> {
+        let root = self.version_path(receipt)?;
+        self.verify_inventory(&root, receipt)
+    }
+
+    fn verify_inventory(&self, root: &Path, receipt: &Receipt) -> Result<(), String> {
         if receipt.files.is_empty() {
             return Err("receipt has no verified file inventory".into());
         }
-        let root = self.version_path(receipt)?;
-        guard_dir(&root)?;
+        guard_dir(root)?;
         let expected: HashSet<_> = receipt
             .files
             .iter()
             .map(|f| f.path.to_ascii_lowercase())
             .collect();
+        let expected_dirs = parent_directories(&receipt.files);
         let mut actual = HashSet::new();
-        scan_files(&root, &root, &mut actual)?;
-        if expected != actual {
+        let mut actual_dirs = HashSet::new();
+        scan_files(root, root, &mut actual, &mut actual_dirs)?;
+        if expected != actual || expected_dirs != actual_dirs {
             return Err("installed file inventory changed".into());
         }
         for item in &receipt.files {
@@ -439,6 +591,34 @@ impl InstallRoot {
         }
         if !expected.contains(&receipt.entrypoint.to_ascii_lowercase()) {
             return Err("entrypoint missing from inventory".into());
+        }
+        Ok(())
+    }
+
+    fn verify_remaining_inventory(&self, root: &Path, receipt: &Receipt) -> Result<(), String> {
+        guard_dir(root)?;
+        let mut actual = HashSet::new();
+        let mut actual_dirs = HashSet::new();
+        scan_files(root, root, &mut actual, &mut actual_dirs)?;
+        let expected: HashSet<_> = receipt
+            .files
+            .iter()
+            .map(|file| file.path.to_ascii_lowercase())
+            .collect();
+        if !actual.is_subset(&expected)
+            || !actual_dirs.is_subset(&parent_directories(&receipt.files))
+        {
+            return Err("uninstall parking contains an unowned file".into());
+        }
+        for file in &receipt.files {
+            if actual.contains(&file.path.to_ascii_lowercase()) {
+                let path = root.join(&file.path);
+                guard_file(&path)?;
+                let (bytes, sha) = file_digest(&path)?;
+                if bytes != file.bytes || sha != file.sha256 {
+                    return Err("uninstall parking contains a changed file".into());
+                }
+            }
         }
         Ok(())
     }
@@ -577,7 +757,24 @@ fn file_digest(path: &Path) -> Result<(u64, String), String> {
     Ok((count, format!("{:x}", digest.finalize())))
 }
 
-fn scan_files(root: &Path, path: &Path, found: &mut HashSet<String>) -> Result<(), String> {
+fn parent_directories(files: &[InstalledFile]) -> HashSet<String> {
+    let mut dirs = HashSet::new();
+    for file in files {
+        let mut parent = file.path.as_str();
+        while let Some((prefix, _)) = parent.rsplit_once('/') {
+            dirs.insert(prefix.to_ascii_lowercase());
+            parent = prefix;
+        }
+    }
+    dirs
+}
+
+fn scan_files(
+    root: &Path,
+    path: &Path,
+    found: &mut HashSet<String>,
+    dirs: &mut HashSet<String>,
+) -> Result<(), String> {
     for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
@@ -586,19 +783,37 @@ fn scan_files(root: &Path, path: &Path, found: &mut HashSet<String>) -> Result<(
             return Err("installed directory contains a link".into());
         }
         if metadata.is_dir() {
-            scan_files(root, &path, found)?;
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !dirs.insert(relative.to_ascii_lowercase()) {
+                return Err("installed directory contains case-colliding directories".into());
+            }
+            scan_files(root, &path, found, dirs)?;
         } else if metadata.is_file() {
             let relative = path
                 .strip_prefix(root)
                 .map_err(|e| e.to_string())?
                 .to_string_lossy()
                 .replace('\\', "/");
-            found.insert(relative.to_ascii_lowercase());
+            if !found.insert(relative.to_ascii_lowercase()) {
+                return Err("installed directory contains case-colliding files".into());
+            }
         } else {
             return Err("installed directory contains a special file".into());
         }
     }
     Ok(())
+}
+
+fn path_occupied(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("inspect install path: {error}")),
+    }
 }
 
 fn guard_existing_ancestors(root: &Path, path: &Path) -> Result<(), String> {
@@ -662,5 +877,183 @@ mod redirect_tests {
         assert!(approved_redirect(&source, &canonical));
         assert!(approved_redirect(&source, &asset));
         assert!(!approved_redirect(&source, &other));
+    }
+}
+
+#[cfg(test)]
+mod uninstall_transaction_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn fixture() -> (TempDir, InstallRoot) {
+        let tmp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let root = InstallRoot::open(&tmp.path().join("launcher")).unwrap();
+        let app_dir = root.app_path("gridstrike").unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        let mut receipts = Vec::new();
+        for (version, bytes) in [("1.0.0", b"one".as_slice()), ("2.0.0", b"two".as_slice())] {
+            let version_dir = app_dir.join(version);
+            fs::create_dir(&version_dir).unwrap();
+            fs::write(version_dir.join("gridstrike.exe"), bytes).unwrap();
+            receipts.push(Receipt {
+                app_id: "gridstrike".into(),
+                version: version.into(),
+                platform: std::env::consts::OS.into(),
+                arch: std::env::consts::ARCH.into(),
+                entrypoint: "gridstrike.exe".into(),
+                files: vec![InstalledFile {
+                    path: "gridstrike.exe".into(),
+                    bytes: bytes.len() as u64,
+                    sha256: format!("{:x}", Sha256::digest(bytes)),
+                }],
+            });
+        }
+        root.commit(&InstalledState {
+            schema: crate::STATE_SCHEMA,
+            installed: vec![receipts.remove(1)],
+            retained: receipts,
+        })
+        .unwrap();
+        fs::write(root.path.join("user-project.txt"), b"keep").unwrap();
+        (tmp, root)
+    }
+
+    #[test]
+    fn failure_after_first_park_restores_every_version() {
+        let (_tmp, root) = fixture();
+        let error = root
+            .uninstall_impl("gridstrike", &mut |count| {
+                if count == 1 {
+                    Err("injected parking failure".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert!(error.contains("injected parking failure"));
+        assert_eq!(
+            fs::read(root.entrypoint("gridstrike").unwrap()).unwrap(),
+            b"two"
+        );
+        assert_eq!(
+            fs::read(root.path.join("apps/gridstrike/1.0.0/gridstrike.exe")).unwrap(),
+            b"one"
+        );
+        assert!(!root.uninstall_journal_path().exists());
+        assert_eq!(
+            fs::read(root.path.join("user-project.txt")).unwrap(),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn uninstall_preserves_unowned_empty_directory() {
+        let (_tmp, root) = fixture();
+        let user_dir = root.path.join("apps/gridstrike/2.0.0/user-project");
+        fs::create_dir(&user_dir).unwrap();
+        assert!(root.uninstall("gridstrike").is_err());
+        assert!(user_dir.is_dir());
+        assert!(root.state().unwrap().receipt("gridstrike").is_some());
+    }
+
+    #[test]
+    fn reopening_restores_versions_parked_before_receipt_commit() {
+        let (tmp, root) = fixture();
+        let state = root.state().unwrap();
+        let receipt = state.receipt("gridstrike").unwrap().clone();
+        let parked_name = ".uninstall-interrupted";
+        let parked = root.app_path("gridstrike").unwrap().join(parked_name);
+        root.write_uninstall_journal(&UninstallJournal {
+            schema: 1,
+            app_id: "gridstrike".into(),
+            versions: vec![ParkedVersion {
+                receipt: receipt.clone(),
+                parked_name: parked_name.into(),
+            }],
+        })
+        .unwrap();
+        fs::rename(root.version_path(&receipt).unwrap(), &parked).unwrap();
+
+        let reopened = InstallRoot::open(&tmp.path().join("launcher")).unwrap();
+        assert_eq!(
+            fs::read(reopened.entrypoint("gridstrike").unwrap()).unwrap(),
+            b"two"
+        );
+        assert!(!parked.exists());
+        assert!(!reopened.uninstall_journal_path().exists());
+        assert_eq!(
+            fs::read(reopened.path.join("user-project.txt")).unwrap(),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn reopening_finishes_verified_cleanup_after_receipt_commit() {
+        let (tmp, root) = fixture();
+        let state = root.state().unwrap();
+        let app_dir = root.app_path("gridstrike").unwrap();
+        let versions: Vec<_> = state
+            .installed
+            .iter()
+            .chain(&state.retained)
+            .enumerate()
+            .map(|(index, receipt)| ParkedVersion {
+                receipt: receipt.clone(),
+                parked_name: format!(".uninstall-interrupted-{index}"),
+            })
+            .collect();
+        root.write_uninstall_journal(&UninstallJournal {
+            schema: 1,
+            app_id: "gridstrike".into(),
+            versions: versions.clone(),
+        })
+        .unwrap();
+        for item in &versions {
+            fs::rename(
+                root.version_path(&item.receipt).unwrap(),
+                app_dir.join(&item.parked_name),
+            )
+            .unwrap();
+        }
+        root.commit(&InstalledState::empty()).unwrap();
+
+        let reopened = InstallRoot::open(&tmp.path().join("launcher")).unwrap();
+        assert!(reopened.state().unwrap().receipt("gridstrike").is_none());
+        for item in &versions {
+            assert!(!app_dir.join(&item.parked_name).exists());
+        }
+        assert!(!reopened.uninstall_journal_path().exists());
+        assert_eq!(
+            fs::read(reopened.path.join("user-project.txt")).unwrap(),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn reopening_finishes_partially_deleted_owned_parking() {
+        let (tmp, root) = fixture();
+        let receipt = root.state().unwrap().receipt("gridstrike").unwrap().clone();
+        let parked_name = ".uninstall-partially-deleted";
+        let parked = root.app_path("gridstrike").unwrap().join(parked_name);
+        root.write_uninstall_journal(&UninstallJournal {
+            schema: 1,
+            app_id: "gridstrike".into(),
+            versions: vec![ParkedVersion {
+                receipt: receipt.clone(),
+                parked_name: parked_name.into(),
+            }],
+        })
+        .unwrap();
+        fs::rename(root.version_path(&receipt).unwrap(), &parked).unwrap();
+        root.commit(&InstalledState::empty()).unwrap();
+        fs::remove_file(parked.join("gridstrike.exe")).unwrap();
+
+        let reopened = InstallRoot::open(&tmp.path().join("launcher")).unwrap();
+        assert!(!parked.exists());
+        assert!(!reopened.uninstall_journal_path().exists());
+        assert_eq!(
+            fs::read(reopened.path.join("user-project.txt")).unwrap(),
+            b"keep"
+        );
     }
 }

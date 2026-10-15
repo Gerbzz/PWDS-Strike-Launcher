@@ -13,7 +13,7 @@ The launcher brings the Strike family into a single catalog. Browse each app's p
 
 ## Native UI preview
 
-These are inspected captures of the real Rust/egui launcher window from [draft PR #1](https://github.com/Gerbzz/PWDS-Strike-Launcher/pull/1), source commit [`bde73be`](https://github.com/Gerbzz/PWDS-Strike-Launcher/commit/bde73be12529557619ac8abf5cf98e1a2595dc32). They were taken on a Linux virtual display with software OpenGL. The draft includes a catalog layout fix that has not been merged into `main`; these images show that draft build, not a current downloadable release.
+These are inspected captures of the real Rust/egui launcher window from [merged PR #1](https://github.com/Gerbzz/PWDS-Strike-Launcher/pull/1), source commit [`bde73be`](https://github.com/Gerbzz/PWDS-Strike-Launcher/commit/bde73be12529557619ac8abf5cf98e1a2595dc32). They were taken on a Linux virtual display with software OpenGL. These images are development previews, not a downloadable release.
 
 ![Native launcher catalog showing five coming-soon app cards](docs/screenshots/launcher-catalog.png)
 

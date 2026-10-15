@@ -227,6 +227,11 @@ impl InstalledState {
                 }
             }
         }
+        let serialized = serde_json::to_vec(self)
+            .map_err(|e| format!("cannot serialize installed state: {e}"))?;
+        if serialized.len() as u64 > MAX_STATE_BYTES {
+            return Err("installed state exceeds 1 MiB".into());
+        }
         Ok(())
     }
 
