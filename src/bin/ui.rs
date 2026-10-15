@@ -135,24 +135,24 @@ impl LauncherUi {
     }
 
     fn logo_slot(ui: &mut egui::Ui) {
-        egui::Frame::none()
-            .fill(Color32::from_rgb(31, 43, 59))
-            .show(ui, |ui| {
-                ui.set_min_size(egui::vec2(76.0, 58.0));
-                ui.vertical_centered(|ui| {
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new("LOGO")
-                            .strong()
-                            .color(Color32::from_rgb(144, 170, 190)),
-                    );
-                    ui.label(
-                        RichText::new("pending")
-                            .small()
-                            .color(Color32::from_rgb(144, 170, 190)),
-                    );
-                });
-            });
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(76.0, 58.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, Color32::from_rgb(31, 43, 59));
+        let color = Color32::from_rgb(144, 170, 190);
+        painter.text(
+            rect.center() + egui::vec2(0.0, -8.0),
+            egui::Align2::CENTER_CENTER,
+            "LOGO",
+            egui::FontId::proportional(13.0),
+            color,
+        );
+        painter.text(
+            rect.center() + egui::vec2(0.0, 9.0),
+            egui::Align2::CENTER_CENTER,
+            "pending",
+            egui::FontId::proportional(10.0),
+            color,
+        );
     }
 
     fn catalog(&self, ui: &mut egui::Ui) {
