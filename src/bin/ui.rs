@@ -304,6 +304,11 @@ fn run() -> Result<(), String> {
     let captured = capture.is_some();
     let result = Arc::clone(&outcome);
     let options = eframe::NativeOptions {
+        renderer: if captured {
+            eframe::Renderer::Glow
+        } else {
+            eframe::Renderer::Wgpu
+        },
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1050.0, 760.0])
             .with_min_inner_size([780.0, 540.0]),
