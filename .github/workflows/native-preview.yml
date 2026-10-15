@@ -39,6 +39,9 @@ jobs:
           rustc --version
           cargo --version
           command -v xvfb-run
+      - name: Install X11 keyboard runtime
+        shell: bash
+        run: sudo apt-get install -y --no-install-recommends libxkbcommon-x11-0
       - name: Build the exact branch source
         shell: bash
         run: cargo build --locked --features native-ui --bin pwds-strike-launcher-ui
