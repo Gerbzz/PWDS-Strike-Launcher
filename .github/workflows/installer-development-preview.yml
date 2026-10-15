@@ -60,9 +60,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'preview install failed' }
           & (Join-Path $root 'apps/gridstrike/0.5.0/gridstrike.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'installed GridStrike version check failed' }
+          Copy-Item -LiteralPath (Join-Path $root 'installed.json') -Destination (Join-Path $preview 'installed-receipt.json')
           $env:PWDS_LAUNCHER_PREVIEW_ROOT = $root
           & 'target/debug/pwds-strike-launcher-ui.exe' --capture library (Join-Path $preview 'launcher-library-preview.png')
-          if ($LASTEXITCODE -ne 0) { throw 'native library capture failed' }
+          $captureSucceeded = $LASTEXITCODE -eq 0
           $data = Join-Path $preview 'user-project.txt'
           Set-Content -LiteralPath $data -Value 'preserve me'
           & $launcher preview-uninstall $root
@@ -70,6 +71,7 @@ jobs:
           if (Test-Path -LiteralPath (Join-Path $root 'apps/gridstrike/0.5.0')) { throw 'app version still installed' }
           if ((Get-Content -LiteralPath $data -Raw).Trim() -ne 'preserve me') { throw 'user data changed' }
           Add-Content -LiteralPath (Join-Path $preview 'provenance.txt') -Value 'install_launch_uninstall=passed on isolated runner root'
+          if (-not $captureSucceeded) { throw 'native library capture failed after install/launch/uninstall passed' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -5,6 +5,7 @@ use pwds_strike_launcher::{
     installer::{InstallRoot, Phase},
     plan_install,
 };
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -23,6 +24,7 @@ struct LauncherUi {
     page: Page,
     manifest: Option<TrustedManifest>,
     state: Option<InstalledState>,
+    verified_ids: HashSet<String>,
     error: Option<String>,
     root: Option<Arc<InstallRoot>>,
     job: Option<UiJob>,
@@ -72,10 +74,23 @@ impl LauncherUi {
             .cloned()
             .or_else(|| state.as_ref().err().cloned())
             .or_else(|| root.as_ref().err().cloned());
+        let verified_ids = match (&root, &state) {
+            (Ok(root), Ok(state)) => state
+                .installed
+                .iter()
+                .filter(|r| {
+                    (r.platform.as_str(), r.arch.as_str()) == current_target()
+                        && root.entrypoint(&r.app_id).is_ok()
+                })
+                .map(|r| r.app_id.clone())
+                .collect(),
+            _ => HashSet::new(),
+        };
         Self {
             page: Page::Catalog,
             manifest: manifest.ok(),
             state: state.ok(),
+            verified_ids,
             error,
             root: root.ok(),
             job: None,
@@ -153,8 +168,28 @@ impl LauncherUi {
         let result = job.result.lock().unwrap().take();
         if let Some(result) = result {
             let id = job.app_id.clone();
-            self.state = self.root.as_ref().and_then(|root| root.state().ok());
-            self.notice = Some(result.map(|_| format!("{id}: operation complete")));
+            match self.root.as_ref().map(|root| root.state()) {
+                Some(Ok(state)) => {
+                    self.verified_ids = state
+                        .installed
+                        .iter()
+                        .filter(|r| {
+                            (r.platform.as_str(), r.arch.as_str()) == current_target()
+                                && self
+                                    .root
+                                    .as_ref()
+                                    .is_some_and(|root| root.entrypoint(&r.app_id).is_ok())
+                        })
+                        .map(|r| r.app_id.clone())
+                        .collect();
+                    self.state = Some(state);
+                    self.notice = Some(result.map(|_| format!("{id}: operation complete")));
+                }
+                Some(Err(error)) => {
+                    self.notice = Some(Err(format!("cannot refresh library: {error}")))
+                }
+                None => self.notice = Some(Err("install root unavailable".into())),
+            }
             self.job = None;
         }
     }
@@ -304,8 +339,10 @@ impl LauncherUi {
                             });
                         });
                         ui.add_space(5.0);
-                        let available =
-                            plan_install(manifest, state, item.id, platform, arch).is_ok();
+                        let available = plan_install(manifest, state, item.id, platform, arch)
+                            .is_ok()
+                            && (state.receipt(item.id).is_none()
+                                || self.verified_ids.contains(item.id));
                         let label = if state.receipt(item.id).is_some() {
                             "Update"
                         } else {
@@ -351,7 +388,18 @@ impl LauncherUi {
                             receipt.version, receipt.platform, receipt.arch
                         ));
                         ui.horizontal(|ui| {
-                            let idle = self.job.is_none() && !receipt.files.is_empty();
+                            let idle =
+                                self.job.is_none() && self.verified_ids.contains(&receipt.app_id);
+                            if self.job.is_none() && !idle {
+                                let message = if (receipt.platform.as_str(), receipt.arch.as_str())
+                                    != current_target()
+                                {
+                                    "Installed for another platform"
+                                } else {
+                                    "Installation needs verification or repair"
+                                };
+                                ui.colored_label(Color32::LIGHT_RED, message);
+                            }
                             if ui.add_enabled(idle, egui::Button::new("Launch")).clicked() {
                                 action = Some((receipt.app_id.clone(), "launch"));
                             }
@@ -440,6 +488,9 @@ impl eframe::App for LauncherUi {
                     match phase {
                         Phase::DownloadBytes(done, total) => {
                             ui.label(format!("{}: downloading {done}/{total} bytes", job.app_id));
+                        }
+                        Phase::ExtractedEntries(done, total) => {
+                            ui.label(format!("{}: extracting {done}/{total} entries", job.app_id));
                         }
                         other => {
                             ui.label(format!("{}: {other:?}", job.app_id));
@@ -535,7 +586,7 @@ fn run() -> Result<(), String> {
     let captured = capture.is_some();
     let result = Arc::clone(&outcome);
     let options = eframe::NativeOptions {
-        renderer: if captured {
+        renderer: if captured && !cfg!(target_os = "windows") {
             eframe::Renderer::Glow
         } else {
             eframe::Renderer::Wgpu

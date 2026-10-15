@@ -51,6 +51,17 @@ fn temp_directory_can_be_renamed_on_this_platform() {
 }
 
 #[test]
+fn receipt_file_can_replace_existing_file_by_rename() {
+    let tmp = fixture();
+    let old = tmp.path().join("old.json");
+    let new = tmp.path().join("new.json");
+    fs::write(&old, b"old").unwrap();
+    fs::write(&new, b"new").unwrap();
+    fs::rename(&new, &old).unwrap();
+    assert_eq!(fs::read(&old).unwrap(), b"new");
+}
+
+#[test]
 fn installs_verified_archive_and_preserves_user_data_on_uninstall() {
     let tmp = fixture();
     let archive = tmp.path().join("app.zip");
@@ -330,4 +341,137 @@ fn uninstall_after_two_updates_removes_all_owned_versions() {
     for version in ["1.0.0", "2.0.0", "3.0.0"] {
         assert!(!base.join(version).exists(), "{version}");
     }
+}
+
+#[test]
+fn rejects_archive_symlinks_and_case_collisions() {
+    let tmp = fixture();
+    let archive = tmp.path().join("link.zip");
+    let mut zip = ZipWriter::new(fs::File::create(&archive).unwrap());
+    zip.add_symlink(
+        "gridstrike.exe",
+        "outside.exe",
+        SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.finish().unwrap();
+    let bytes = fs::read(&archive).unwrap();
+    let mut release = package(&tmp.path().join("seed.zip"), &[("gridstrike.exe", b"seed")]);
+    release.artifact_bytes = bytes.len() as u64;
+    release.artifact_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let root = root(&tmp);
+    assert!(
+        root.install_archive(
+            &InstallPlan {
+                release: &release,
+                is_update: false
+            },
+            &archive,
+            &mut |_| true
+        )
+        .is_err()
+    );
+
+    let collision = tmp.path().join("collision.zip");
+    let release = package(
+        &collision,
+        &[("gridstrike.exe", b"a"), ("GRIDSTRIKE.EXE", b"b")],
+    );
+    assert!(
+        root.install_archive(
+            &InstallPlan {
+                release: &release,
+                is_update: false
+            },
+            &collision,
+            &mut |_| true
+        )
+        .is_err()
+    );
+    assert!(root.state().unwrap().installed.is_empty());
+}
+
+#[test]
+fn modified_installed_binary_cannot_launch_or_uninstall() {
+    let tmp = fixture();
+    let archive = tmp.path().join("app.zip");
+    let release = package(&archive, &[("gridstrike.exe", b"original")]);
+    let root = root(&tmp);
+    root.install_archive(
+        &InstallPlan {
+            release: &release,
+            is_update: false,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+    let entry = root.entrypoint("gridstrike").unwrap();
+    fs::write(&entry, b"tampered").unwrap();
+    assert!(root.entrypoint("gridstrike").is_err());
+    assert!(root.uninstall("gridstrike").is_err());
+    assert!(root.state().unwrap().receipt("gridstrike").is_some());
+}
+
+#[test]
+fn failed_first_launch_restores_previous_verified_version() {
+    let tmp = fixture();
+    let archive = tmp.path().join("app.zip");
+    let mut release = package(
+        &archive,
+        &[("gridstrike.exe", b"old non-executable fixture")],
+    );
+    let root = root(&tmp);
+    root.install_archive(
+        &InstallPlan {
+            release: &release,
+            is_update: false,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+    release = package(
+        &archive,
+        &[("gridstrike.exe", b"new non-executable fixture")],
+    );
+    release.version = "2.0.0".into();
+    root.install_archive(
+        &InstallPlan {
+            release: &release,
+            is_update: true,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+    assert!(root.launch("gridstrike", &[]).is_err());
+    assert_eq!(
+        root.state().unwrap().receipt("gridstrike").unwrap().version,
+        "1.0.0"
+    );
+}
+
+#[test]
+fn rollback_is_unavailable_without_a_distinct_previous_version() {
+    let tmp = fixture();
+    let archive = tmp.path().join("app.zip");
+    let release = package(&archive, &[("gridstrike.exe", b"only")]);
+    let root = root(&tmp);
+    root.install_archive(
+        &InstallPlan {
+            release: &release,
+            is_update: false,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+    fs::copy(
+        tmp.path().join("launcher/installed.json"),
+        tmp.path().join("launcher/installed.backup.json"),
+    )
+    .unwrap();
+    assert!(!root.can_rollback("gridstrike"));
+    assert!(root.rollback("gridstrike").is_err());
 }

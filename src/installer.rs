@@ -24,6 +24,7 @@ pub enum Phase {
     DownloadBytes(u64, u64),
     Verifying,
     Extracting,
+    ExtractedEntries(usize, usize),
     Activating,
     Complete,
 }
@@ -34,6 +35,18 @@ pub struct InstallRoot {
 
 impl InstallRoot {
     pub fn open(path: &Path) -> Result<Self, String> {
+        let mut ancestor = PathBuf::new();
+        for component in path.components() {
+            ancestor.push(component.as_os_str());
+            match fs::symlink_metadata(&ancestor) {
+                Ok(meta) if is_link(&meta) => {
+                    return Err("install root contains a link or reparse point".into());
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("inspect install root: {error}")),
+            }
+        }
         fs::create_dir_all(path).map_err(|e| format!("create install root: {e}"))?;
         guard_dir(path)?;
         let path = path
@@ -103,24 +116,22 @@ impl InstallRoot {
         let backup = self.backup_path();
         if backup.exists() {
             guard_file(&backup)?;
-            fs::remove_file(&backup).map_err(|e| e.to_string())?;
         }
-        let had_state = state.exists();
-        if had_state {
+        if state.exists() {
             guard_file(&state)?;
-            fs::rename(&state, &backup).map_err(|e| e.to_string())?;
+            let mut source = File::open(&state).map_err(|e| e.to_string())?;
+            let mut backup_temp = NamedTempFile::new_in(&self.path).map_err(|e| e.to_string())?;
+            std::io::copy(&mut source, &mut backup_temp).map_err(|e| e.to_string())?;
+            backup_temp
+                .as_file_mut()
+                .sync_all()
+                .map_err(|e| e.to_string())?;
+            let backup_temp_path = backup_temp.into_temp_path();
+            fs::rename(&backup_temp_path, &backup)
+                .map_err(|e| format!("save rollback receipt: {e}"))?;
         }
-        if let Err(error) = fs::rename(&temp_path, &state) {
-            if had_state {
-                let _ = fs::rename(&backup, &state);
-            }
-            return Err(format!("commit installed state: {error}"));
-        }
-        OpenOptions::new()
-            .write(true)
-            .open(&state)
-            .and_then(|file| file.sync_all())
-            .map_err(|e| format!("sync installed state: {e}"))?;
+        // Same-volume replacement changes the visible active receipt in one rename.
+        fs::rename(&temp_path, &state).map_err(|e| format!("commit installed state: {e}"))?;
         Ok(())
     }
 
@@ -219,6 +230,7 @@ impl InstallRoot {
             .timeout_connect(Some(std::time::Duration::from_secs(15)))
             .build()
             .into();
+        let source = Url::parse(&release.artifact_url).map_err(|_| "invalid pinned release URL")?;
         let mut url = release.artifact_url.clone();
         let mut response = None;
         for hop in 0..=2 {
@@ -240,19 +252,7 @@ impl InstallRoot {
                 .and_then(|h| h.to_str().ok())
                 .ok_or("release redirect lacks Location")?;
             let next = Url::parse(location).map_err(|_| "invalid release redirect")?;
-            if next.scheme() != "https"
-                || next.port().is_some()
-                || !next.username().is_empty()
-                || next.password().is_some()
-                || !matches!(
-                    next.host_str(),
-                    Some(
-                        "release-assets.githubusercontent.com"
-                            | "objects.githubusercontent.com"
-                            | "github-releases.githubusercontent.com"
-                    )
-                )
-            {
+            if !approved_redirect(&source, &next) {
                 return Err("release redirect leaves approved GitHub asset hosts".into());
             }
             url = next.to_string();
@@ -330,17 +330,18 @@ impl InstallRoot {
         let _lock = self.operation_lock()?;
         let mut old = InstalledState::load(&self.backup_path())?;
         let receipt = old.receipt(id).ok_or("no previous installed version")?;
-        self.verify_receipt(receipt)?;
-        if let Some(current) = self.state()?.receipt(id).cloned() {
-            old.retained
-                .retain(|r| !(r.app_id == id && r.version == current.version));
-            if old
-                .receipt(id)
-                .is_some_and(|r| r.version != current.version)
-            {
-                old.retained.push(current);
-            }
+        let current = self
+            .state()?
+            .receipt(id)
+            .cloned()
+            .ok_or("app is not installed")?;
+        if receipt.version == current.version {
+            return Err("no distinct previous version".into());
         }
+        self.verify_receipt(receipt)?;
+        old.retained
+            .retain(|r| !(r.app_id == id && r.version == current.version));
+        old.retained.push(current);
         self.commit(&old)
     }
 
@@ -348,7 +349,14 @@ impl InstallRoot {
         InstalledState::load(&self.backup_path())
             .ok()
             .and_then(|s| s.receipt(id).cloned())
-            .is_some_and(|r| self.verify_receipt(&r).is_ok())
+            .is_some_and(|r| {
+                self.state()
+                    .ok()
+                    .and_then(|state| state.receipt(id).cloned())
+                    .is_some_and(|current| {
+                        current.version != r.version && self.verify_receipt(&r).is_ok()
+                    })
+            })
     }
 
     pub fn uninstall(&self, id: &str) -> Result<(), String> {
@@ -436,6 +444,28 @@ impl InstallRoot {
     }
 }
 
+fn approved_redirect(source: &Url, next: &Url) -> bool {
+    if next.scheme() != "https"
+        || next.port().is_some()
+        || !next.username().is_empty()
+        || next.password().is_some()
+        || next.fragment().is_some()
+    {
+        return false;
+    }
+    if next.host_str() == Some("github.com") {
+        return next.query().is_none() && next.path().eq_ignore_ascii_case(source.path());
+    }
+    matches!(
+        next.host_str(),
+        Some(
+            "release-assets.githubusercontent.com"
+                | "objects.githubusercontent.com"
+                | "github-releases.githubusercontent.com"
+        )
+    )
+}
+
 fn extract_archive(
     archive: &Path,
     root: &Path,
@@ -472,7 +502,8 @@ fn extract_archive(
         }
     }
     let mut files = Vec::new();
-    for index in 0..zip.len() {
+    let entry_count = zip.len();
+    for index in 0..entry_count {
         if !progress(Phase::Extracting) {
             return Err("installation cancelled".into());
         }
@@ -482,6 +513,9 @@ fn extract_archive(
         if entry.is_dir() {
             fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
             guard_dir(&destination)?;
+            if !progress(Phase::ExtractedEntries(index + 1, entry_count)) {
+                return Err("installation cancelled".into());
+            }
             continue;
         }
         if let Some(parent) = destination.parent() {
@@ -520,6 +554,9 @@ fn extract_archive(
             bytes,
             sha256: format!("{:x}", digest.finalize()),
         });
+        if !progress(Phase::ExtractedEntries(index + 1, entry_count)) {
+            return Err("installation cancelled".into());
+        }
     }
     Ok(files)
 }
@@ -603,4 +640,27 @@ fn is_link(meta: &fs::Metadata) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+
+    #[test]
+    fn permits_only_same_release_casing_redirect_or_github_asset_host() {
+        let source =
+            Url::parse("https://github.com/Gerbzz/gridstrike/releases/download/v1/app.zip")
+                .unwrap();
+        let canonical =
+            Url::parse("https://github.com/Gerbzz/GridStrike/releases/download/v1/app.zip")
+                .unwrap();
+        let asset = Url::parse("https://release-assets.githubusercontent.com/signed-asset?token=1")
+            .unwrap();
+        let other =
+            Url::parse("https://github.com/SomeoneElse/gridstrike/releases/download/v1/app.zip")
+                .unwrap();
+        assert!(approved_redirect(&source, &canonical));
+        assert!(approved_redirect(&source, &asset));
+        assert!(!approved_redirect(&source, &other));
+    }
 }

@@ -52,6 +52,7 @@ fn run() -> Result<(), String> {
 fn print_phase(phase: Phase) {
     match phase {
         Phase::DownloadBytes(done, total) => eprintln!("Downloading: {done}/{total} bytes"),
+        Phase::Extracting => {}
         other => eprintln!("{other:?}"),
     }
 }
