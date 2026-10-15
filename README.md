@@ -11,6 +11,16 @@
 
 The launcher brings the Strike family into a single catalog. Browse each app's purpose and release status, and see a library designed to track verified installations when packaged releases exist.
 
+## Native UI preview
+
+These are inspected captures of the real Rust/egui launcher window from [draft PR #1](https://github.com/Gerbzz/PWDS-Strike-Launcher/pull/1), source commit [`bde73be`](https://github.com/Gerbzz/PWDS-Strike-Launcher/commit/bde73be12529557619ac8abf5cf98e1a2595dc32). They were taken on a Linux virtual display with software OpenGL. The draft includes a catalog layout fix that has not been merged into `main`; these images show that draft build, not a current downloadable release.
+
+![Native launcher catalog showing five coming-soon app cards](docs/screenshots/launcher-catalog.png)
+
+![Native launcher library showing its empty state](docs/screenshots/launcher-library.png)
+
+The bundled release manifest and capture runner's installed state were empty. The catalog shows unavailable installation controls, and the library shows no launcher-managed apps. See the [capture provenance](docs/screenshots/README.md) for the build run and file hashes.
+
 ## Highlights
 
 - Browse app cards with purpose and release status.
@@ -46,7 +56,7 @@ Current entries are source or development builds, with no accepted clean-machine
 
 ## Verification and limits
 
-Source formatting and offline Cargo metadata checks passed. Compilation, visible UI review, and clean-machine installation remain outstanding. A source test alone would not verify the planned install or update flow.
+Source formatting and offline Cargo metadata checks passed. The draft capture source built on a standard hosted Windows runner, and its native catalog and library were captured and visually reviewed on a hosted Linux runner. Clean-machine installation remains outstanding. These captures do not verify the planned install or update flow.
 
 The next functional milestone is one properly licensed and packaged Windows release with a pinned artifact, a bounded downloader and safe ZIP extraction into same-volume staging, atomic activation and recovery, then a clean-machine install/update/uninstall test. User documents and settings must stay outside versioned app directories and remain after uninstall by default.
 
