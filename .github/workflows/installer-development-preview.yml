@@ -1,0 +1,79 @@
+name: Installer development preview
+
+on:
+  push:
+    branches: [feature/verified-install-workflow]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-preview:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: -C debuginfo=0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Gerbzz/GridStrike
+          ref: a4457c872b9fad0b492c30bf585cccfb4d25cd9e
+          path: gridstrike-source
+      - name: Test launcher install transactions
+        shell: pwsh
+        run: cargo test --locked --features developer-preview
+      - name: Build real GridStrike app on standard Windows runner
+        shell: pwsh
+        working-directory: gridstrike-source
+        run: cargo build --locked -p gridcraft --bin gridstrike
+      - name: Build launcher CLI and native UI
+        shell: pwsh
+        run: cargo build --locked --features native-ui,developer-preview --bins
+      - name: Package and exercise isolated development preview
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $preview = Join-Path $env:RUNNER_TEMP 'strike-development-preview'
+          $package = Join-Path $preview 'package'
+          $root = Join-Path $preview 'isolated-launcher'
+          New-Item -ItemType Directory -Force -Path $package | Out-Null
+          Copy-Item -LiteralPath 'gridstrike-source/target/debug/gridstrike.exe' -Destination (Join-Path $package 'gridstrike.exe')
+          foreach ($name in @('LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'ATTRIBUTION.md', 'UPSTREAM_ATTRIBUTION.md')) {
+            Copy-Item -LiteralPath (Join-Path 'gridstrike-source' $name) -Destination (Join-Path $package $name)
+          }
+          $zip = Join-Path $preview 'GridStrike-0.5.0-windows-x86_64-DEVELOPMENT-PREVIEW.zip'
+          Compress-Archive -Path (Join-Path $package '*') -DestinationPath $zip
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          $length = (Get-Item -LiteralPath $zip).Length
+          @(
+            'status=DEVELOPMENT PREVIEW; not a public release'
+            "launcher_commit=$env:GITHUB_SHA"
+            'gridstrike_commit=a4457c872b9fad0b492c30bf585cccfb4d25cd9e'
+            "zip_bytes=$length"
+            "zip_sha256=$hash"
+          ) | Set-Content -LiteralPath (Join-Path $preview 'provenance.txt')
+          $launcher = 'target/debug/pwds-strike-launcher.exe'
+          & $launcher preview-install '0.5.0' $zip $root
+          if ($LASTEXITCODE -ne 0) { throw 'preview install failed' }
+          & (Join-Path $root 'apps/gridstrike/0.5.0/gridstrike.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'installed GridStrike version check failed' }
+          $env:PWDS_LAUNCHER_PREVIEW_ROOT = $root
+          & 'target/debug/pwds-strike-launcher-ui.exe' --capture library (Join-Path $preview 'launcher-library-preview.png')
+          if ($LASTEXITCODE -ne 0) { throw 'native library capture failed' }
+          $data = Join-Path $preview 'user-project.txt'
+          Set-Content -LiteralPath $data -Value 'preserve me'
+          & $launcher preview-uninstall $root
+          if ($LASTEXITCODE -ne 0) { throw 'preview uninstall failed' }
+          if (Test-Path -LiteralPath (Join-Path $root 'apps/gridstrike/0.5.0')) { throw 'app version still installed' }
+          if ((Get-Content -LiteralPath $data -Raw).Trim() -ne 'preserve me') { throw 'user data changed' }
+          Add-Content -LiteralPath (Join-Path $preview 'provenance.txt') -Value 'install_launch_uninstall=passed on isolated runner root'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: launcher-gridstrike-development-preview-${{ github.sha }}
+          path: ${{ runner.temp }}/strike-development-preview/
+          if-no-files-found: warn
+          retention-days: 3

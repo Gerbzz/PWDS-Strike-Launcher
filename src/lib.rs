@@ -1,5 +1,6 @@
-//! Shared catalog, installed-state view, and fail-closed release planning.
-//! There is intentionally no downloader, archive extractor, or install executor yet.
+//! Shared catalog, installed-state view, and pinned release planning.
+
+pub mod installer;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -142,6 +143,8 @@ pub struct Release {
 pub struct InstalledState {
     pub schema: u32,
     pub installed: Vec<Receipt>,
+    #[serde(default)]
+    pub retained: Vec<Receipt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -152,6 +155,16 @@ pub struct Receipt {
     pub platform: String,
     pub arch: String,
     pub entrypoint: String,
+    #[serde(default)]
+    pub files: Vec<InstalledFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledFile {
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 impl InstalledState {
@@ -159,6 +172,7 @@ impl InstalledState {
         Self {
             schema: STATE_SCHEMA,
             installed: Vec::new(),
+            retained: Vec::new(),
         }
     }
 
@@ -190,12 +204,28 @@ impl InstalledState {
         }
         let mut ids = HashSet::new();
         for item in &self.installed {
-            if app(&item.app_id).is_none() || !ids.insert(&item.app_id) {
+            if !ids.insert(&item.app_id) {
                 return Err("unknown or duplicate installed app ID".into());
+            }
+        }
+        let mut versions = HashSet::new();
+        for item in self.installed.iter().chain(&self.retained) {
+            if app(&item.app_id).is_none() || !versions.insert((&item.app_id, &item.version)) {
+                return Err("unknown or duplicate installed app version".into());
             }
             version_key(&item.version)?;
             validate_target(&item.platform, &item.arch)?;
             validate_entrypoint(&item.entrypoint)?;
+            let mut paths = HashSet::new();
+            for file in &item.files {
+                validate_entrypoint(&file.path)?;
+                if !paths.insert(file.path.to_ascii_lowercase())
+                    || file.sha256.len() != 64
+                    || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    return Err("invalid installed file inventory".into());
+                }
+            }
         }
         Ok(())
     }
@@ -244,21 +274,8 @@ fn validate_manifest(manifest: &ReleaseManifest) -> Result<(), String> {
 }
 
 fn validate_release(release: &Release) -> Result<(), String> {
+    validate_release_payload(release)?;
     let app = app(&release.app_id).ok_or("unknown release app ID")?;
-    version_key(&release.version)?;
-    validate_target(&release.platform, &release.arch)?;
-    validate_entrypoint(&release.entrypoint)?;
-    if release.artifact_bytes == 0 || release.artifact_bytes > 8 * 1024 * 1024 * 1024 {
-        return Err("artifact size is outside supported limits".into());
-    }
-    if release.artifact_sha256.len() != 64
-        || !release
-            .artifact_sha256
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit())
-    {
-        return Err("artifact SHA-256 must be 64 hex digits".into());
-    }
     let repo = app
         .github_repo
         .ok_or("app has no approved release repository")?;
@@ -298,6 +315,26 @@ fn validate_release(release: &Release) -> Result<(), String> {
             return Err("release URL tag or filename contains unsafe characters".into());
         }
     }
+    Ok(())
+}
+
+fn validate_release_payload(release: &Release) -> Result<(), String> {
+    let app = app(&release.app_id).ok_or("unknown release app ID")?;
+    version_key(&release.version)?;
+    validate_target(&release.platform, &release.arch)?;
+    validate_entrypoint(&release.entrypoint)?;
+    if release.artifact_bytes == 0 || release.artifact_bytes > 8 * 1024 * 1024 * 1024 {
+        return Err("artifact size is outside supported limits".into());
+    }
+    if release.artifact_sha256.len() != 64
+        || !release
+            .artifact_sha256
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit())
+    {
+        return Err("artifact SHA-256 must be 64 hex digits".into());
+    }
+    let _ = app;
     Ok(())
 }
 
@@ -437,14 +474,14 @@ pub fn availability(
             return "Installed for another platform";
         }
         if plan_install(manifest, state, id, platform, arch).is_ok() {
-            "Installed · update planned"
+            "Installed - update available"
         } else {
             "Installed"
         }
     } else if plan_install(manifest, state, id, platform, arch).is_ok() {
-        "Verified release · installer planned"
+        "Verified release available"
     } else {
-        "Coming soon · no verified release"
+        "Coming soon - no verified release"
     }
 }
 
