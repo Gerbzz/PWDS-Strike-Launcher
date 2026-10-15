@@ -197,6 +197,44 @@ fn cancellation_and_existing_version_do_not_change_receipt() {
 }
 
 #[test]
+fn interrupted_update_before_activation_keeps_previous_version() {
+    let tmp = fixture();
+    let archive = tmp.path().join("app.zip");
+    let release = package(&archive, &[("gridstrike.exe", b"old")]);
+    let root = root(&tmp);
+    root.install_archive(
+        &InstallPlan {
+            release: &release,
+            is_update: false,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+
+    let mut update = package(&archive, &[("gridstrike.exe", b"new")]);
+    update.version = "2.0.0".into();
+    let result = root.install_archive(
+        &InstallPlan {
+            release: &update,
+            is_update: true,
+        },
+        &archive,
+        &mut |phase| phase != Phase::Activating,
+    );
+    assert_eq!(result.unwrap_err(), "installation cancelled");
+    assert_eq!(
+        root.state().unwrap().receipt("gridstrike").unwrap().version,
+        "1.0.0"
+    );
+    assert_eq!(
+        fs::read(root.entrypoint("gridstrike").unwrap()).unwrap(),
+        b"old"
+    );
+    assert!(!tmp.path().join("launcher/apps/gridstrike/2.0.0").exists());
+}
+
+#[test]
 fn update_can_roll_back_to_previous_verified_version() {
     let tmp = fixture();
     let archive = tmp.path().join("app.zip");
