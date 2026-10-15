@@ -3,6 +3,10 @@ use pwds_strike_launcher::{
     APPS, InstalledState, TrustedManifest, app, availability, bundled_manifest, current_target,
     default_state_path,
 };
+use std::fs::OpenOptions;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -15,6 +19,15 @@ struct LauncherUi {
     manifest: Option<TrustedManifest>,
     state: Option<InstalledState>,
     error: Option<String>,
+    capture: Option<CaptureOnce>,
+}
+
+struct CaptureOnce {
+    path: PathBuf,
+    outcome: Arc<Mutex<Option<Result<(), String>>>>,
+    started: Instant,
+    settle_frames: u8,
+    requested: bool,
 }
 
 impl LauncherUi {
@@ -31,7 +44,94 @@ impl LauncherUi {
             manifest: manifest.ok(),
             state: state.ok(),
             error,
+            capture: None,
         }
+    }
+
+    fn capture_once(&mut self, path: PathBuf, outcome: Arc<Mutex<Option<Result<(), String>>>>) {
+        self.capture = Some(CaptureOnce {
+            path,
+            outcome,
+            started: Instant::now(),
+            settle_frames: 0,
+            requested: false,
+        });
+    }
+
+    fn finish_capture(&mut self, ctx: &egui::Context, result: Result<(), String>) {
+        if let Some(capture) = self.capture.take() {
+            *capture.outcome.lock().unwrap() = Some(result);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn capture_after_frame(&mut self, ctx: &egui::Context) {
+        let Some(capture) = self.capture.as_ref() else {
+            return;
+        };
+        if capture.started.elapsed() > Duration::from_secs(15) {
+            self.finish_capture(
+                ctx,
+                Err("timed out waiting for the native screenshot".into()),
+            );
+            return;
+        }
+        if capture.requested {
+            let image = ctx.input(|input| {
+                input.events.iter().find_map(|event| match event {
+                    egui::Event::Screenshot { image, .. } => Some(Arc::clone(image)),
+                    _ => None,
+                })
+            });
+            if let Some(image) = image {
+                let result = Self::write_capture_png(&capture.path, &image);
+                self.finish_capture(ctx, result);
+            } else {
+                ctx.request_repaint();
+            }
+            return;
+        }
+        let capture = self.capture.as_mut().unwrap();
+        if capture.settle_frames < 2 {
+            capture.settle_frames += 1;
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            capture.requested = true;
+        }
+        ctx.request_repaint();
+    }
+
+    fn write_capture_png(path: &Path, screenshot: &egui::ColorImage) -> Result<(), String> {
+        let [width, height] = screenshot.size;
+        let capacity = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or("screenshot dimensions overflow")?;
+        let mut rgba = Vec::with_capacity(capacity);
+        for pixel in &screenshot.pixels {
+            rgba.extend_from_slice(&pixel.to_array());
+        }
+        let width = u32::try_from(width).map_err(|_| "screenshot width exceeds PNG limits")?;
+        let height = u32::try_from(height).map_err(|_| "screenshot height exceeds PNG limits")?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| format!("create screenshot {}: {error}", path.display()))?;
+        let mut encoder = png::Encoder::new(&mut file, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|error| format!("start PNG: {error}"))?;
+        writer
+            .write_image_data(&rgba)
+            .map_err(|error| format!("write PNG: {error}"))?;
+        writer
+            .finish()
+            .map_err(|error| format!("finish PNG: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync screenshot: {error}"))
     }
 
     fn logo_slot(ui: &mut egui::Ui) {
@@ -171,10 +271,38 @@ impl eframe::App for LauncherUi {
                 Page::Library => self.library(ui),
             }
         });
+        self.capture_after_frame(ctx);
     }
 }
 
-fn main() -> eframe::Result<()> {
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("PWDS Strike Launcher: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let capture = match args.as_slice() {
+        [] => None,
+        [flag, page, output] if flag == "--capture" => {
+            let page = match page.to_str() {
+                Some("catalog") => Page::Catalog,
+                Some("library") => Page::Library,
+                _ => return Err("capture page must be catalog or library".into()),
+            };
+            Some((page, PathBuf::from(output)))
+        }
+        _ => {
+            return Err(
+                "usage: pwds-strike-launcher-ui [--capture catalog|library NEW.png]".into(),
+            );
+        }
+    };
+    let outcome = Arc::new(Mutex::new(None));
+    let captured = capture.is_some();
+    let result = Arc::clone(&outcome);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1050.0, 760.0])
@@ -184,6 +312,22 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "PWDS Strike Launcher",
         options,
-        Box::new(|_| Ok(Box::new(LauncherUi::new()))),
+        Box::new(move |_| {
+            let mut app = LauncherUi::new();
+            if let Some((page, path)) = capture {
+                app.page = page;
+                app.capture_once(path, result);
+            }
+            Ok(Box::new(app))
+        }),
     )
+    .map_err(|error| error.to_string())?;
+    if captured {
+        outcome
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or("native window closed before capture finished")??;
+    }
+    Ok(())
 }

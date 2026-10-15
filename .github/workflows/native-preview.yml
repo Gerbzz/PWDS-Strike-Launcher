@@ -1,0 +1,60 @@
+name: Native launcher preview
+
+on:
+  push:
+    branches: [feature/native-screenshot-2026-10-15]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-native-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: -C debuginfo=0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check toolchain
+        shell: pwsh
+        run: |
+          rustc --version
+          cargo --version
+      - name: Build the exact branch source
+        shell: pwsh
+        run: cargo build --locked --features native-ui --bin pwds-strike-launcher-ui
+      - name: Capture actual native pages
+        shell: pwsh
+        run: |
+          $preview = Join-Path $env:RUNNER_TEMP 'launcher-preview'
+          New-Item -ItemType Directory -Path $preview -ErrorAction Stop | Out-Null
+          $app = Join-Path (Get-Location) 'target\debug\pwds-strike-launcher-ui.exe'
+          & $app --capture catalog (Join-Path $preview 'launcher-catalog.png')
+          if ($LASTEXITCODE -ne 0) { throw 'Catalog capture failed' }
+          & $app --capture library (Join-Path $preview 'launcher-library.png')
+          if ($LASTEXITCODE -ne 0) { throw 'Library capture failed' }
+          foreach ($name in @('launcher-catalog.png', 'launcher-library.png')) {
+            $path = Join-Path $preview $name
+            $file = Get-Item -LiteralPath $path -ErrorAction Stop
+            if ($file.Length -lt 10000 -or $file.Length -gt 8MB) {
+              throw "$name has an unexpected size: $($file.Length) bytes"
+            }
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $signature = [byte[]](137,80,78,71,13,10,26,10)
+            for ($i = 0; $i -lt $signature.Length; $i++) {
+              if ($bytes[$i] -ne $signature[$i]) { throw "$name is not a PNG" }
+            }
+          }
+          "source_commit=$env:GITHUB_SHA" | Set-Content -LiteralPath (Join-Path $preview 'provenance.txt')
+          "capture=egui native Screenshot event; bundled empty release manifest and runner-local installed state" | Add-Content -LiteralPath (Join-Path $preview 'provenance.txt')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-native-preview-${{ github.sha }}
+          path: ${{ runner.temp }}/launcher-preview/
+          if-no-files-found: error
+          retention-days: 1
