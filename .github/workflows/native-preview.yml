@@ -1,0 +1,69 @@
+name: Native launcher preview
+
+on:
+  push:
+    branches: [feature/native-screenshot-2026-10-15]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-native-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: -C debuginfo=0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the exact branch source on Windows
+        shell: pwsh
+        run: cargo build --locked --features native-ui --bin pwds-strike-launcher-ui
+
+  capture-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: -C debuginfo=0
+      LIBGL_ALWAYS_SOFTWARE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check software display
+        shell: bash
+        run: |
+          rustc --version
+          cargo --version
+          command -v xvfb-run
+      - name: Install X11 keyboard runtime
+        shell: bash
+        run: sudo apt-get install -y --no-install-recommends libxkbcommon-x11-0
+      - name: Build the exact branch source
+        shell: bash
+        run: cargo build --locked --features native-ui --bin pwds-strike-launcher-ui
+      - name: Capture actual native pages in a virtual display
+        shell: bash
+        run: |
+          set -euo pipefail
+          preview="$RUNNER_TEMP/launcher-preview"
+          mkdir -p "$preview"
+          xvfb-run -a target/debug/pwds-strike-launcher-ui --capture catalog "$preview/launcher-catalog.png"
+          xvfb-run -a target/debug/pwds-strike-launcher-ui --capture library "$preview/launcher-library.png"
+          for name in launcher-catalog.png launcher-library.png; do
+            path="$preview/$name"
+            size=$(stat -c %s "$path")
+            test "$size" -gt 10000
+            test "$size" -lt 8388608
+            file "$path" | grep -q 'PNG image data'
+          done
+          printf 'source_commit=%s\ncapture=egui native Screenshot event; Linux Xvfb with Mesa software OpenGL\nstate=bundled empty release manifest and runner-local installed state\n' "$GITHUB_SHA" > "$preview/provenance.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-linux-native-preview-${{ github.sha }}
+          path: ${{ runner.temp }}/launcher-preview/
+          if-no-files-found: error
+          retention-days: 1
