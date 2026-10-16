@@ -28,18 +28,18 @@
     },
     {
       "repository": "emilk/egui", "commit": "320377e3ca63a298e9485cf79559fb150cffa635", "source_relation": "exact-vcs",
-      "files": {"LICENSE-APACHE": "11069edd79019f7dafbe3138841cf289209270dd", "LICENSE-MIT": "673ea5f0505d6a753c93b8e19d11b9"},
+      "files": {"LICENSE-APACHE": "11069edd79019f7dafbe3138841cf289209270dd", "LICENSE-MIT": "673ea5f0505d6fa65c6a2b6a753c93b8e19d11b9"},
       "covers": ["launcher:ecolor 0.30.0", "launcher:emath 0.30.0", "launcher:epaint 0.30.0"]
     },
     {
       "repository": "emilk/egui", "commit": "d864655018fcd73f2df629e5df4df04374b89a4b", "source_relation": "official-release-tag-proxy",
       "source_vcs_commit": "0a3edabd3544c6d339eacd9e606fccee302e4c35", "release_tag": "0.30.0",
-      "files": {"LICENSE-APACHE": "11069edd79019f7dafbe3138841cf289209270dd", "LICENSE-MIT": "673ea5f0505d6a753c93b8e19d11b9"},
+      "files": {"LICENSE-APACHE": "11069edd79019f7dafbe3138841cf289209270dd", "LICENSE-MIT": "673ea5f0505d6fa65c6a2b6a753c93b8e19d11b9"},
       "covers": ["launcher:egui 0.30.0", "launcher:eframe 0.30.0", "launcher:egui-wgpu 0.30.0", "launcher:egui-winit 0.30.0", "launcher:egui_glow 0.30.0"]
     },
     {
       "repository": "emilk/egui", "commit": "49682f8baa058bf49e011035cfbd6e825f88a5ef", "source_relation": "exact-vcs",
-      "files": {"LICENSE-APACHE": "11069edd79019f7dafbe3138841cf289209270dd", "LICENSE-MIT": "673ea5f0505d6a753c93b8e19d11b9"},
+      "files": {"LICENSE-APACHE": "11069edd79019f7dafbe3138841cf289209270dd", "LICENSE-MIT": "673ea5f0505d6fa65c6a2b6a753c93b8e19d11b9"},
       "covers": ["gridstrike:ecolor 0.36.2", "gridstrike:eframe 0.36.2", "gridstrike:egui 0.36.2", "gridstrike:egui-wgpu 0.36.2", "gridstrike:egui-winit 0.36.2", "gridstrike:egui_glow 0.36.2", "gridstrike:emath 0.36.2", "gridstrike:epaint 0.36.2"]
     },
     {

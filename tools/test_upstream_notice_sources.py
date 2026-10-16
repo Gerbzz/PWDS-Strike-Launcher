@@ -1,4 +1,5 @@
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,17 @@ from upstream_notice_sources import collect, git_blob_sha1
 
 
 class UpstreamNoticeTests(unittest.TestCase):
+    def test_curated_plan_has_complete_package_and_git_id_coverage(self):
+        plan = json.loads((Path(__file__).parent / "upstream_notice_plan.json").read_text(encoding="utf-8"))
+        covered = [package for source in plan["sources"] for package in source["covers"]]
+        self.assertEqual(len(covered), 40)
+        self.assertEqual(len(set(covered)), 40)
+        self.assertEqual(len(plan["unresolved"]), 2)
+        for source in plan["sources"]:
+            self.assertEqual(len(source["commit"]), 40)
+            for expected_blob in source["files"].values():
+                self.assertEqual(len(expected_blob), 40)
+
     def fixture(self, blob: bytes):
         return {"sources": [{
             "repository": "Example/project",
