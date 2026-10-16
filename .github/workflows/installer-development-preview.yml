@@ -2,7 +2,7 @@ name: Installer development preview
 
 on:
   push:
-    branches: [feature/verified-install-workflow, feature/launcher-preview-recovery-audit, feature/preview-provenance-inventory]
+    branches: [feature/verified-install-workflow, feature/launcher-preview-recovery-audit, feature/preview-provenance-inventory, feature/preview-font-notices-and-ui-evidence]
   workflow_dispatch:
 
 permissions:
@@ -52,6 +52,11 @@ jobs:
             --app-lock gridstrike-source/Cargo.lock `
             --output (Join-Path $audit 'dependency-inventory.json')
           if ($LASTEXITCODE -ne 0) { throw 'dependency inventory failed' }
+          python tools/font_notices.py `
+            --launcher-metadata (Join-Path $audit 'launcher-metadata.json') `
+            --app-metadata (Join-Path $audit 'gridstrike-metadata.json') `
+            --output (Join-Path $audit 'font-notices')
+          if ($LASTEXITCODE -ne 0) { throw 'font notice collection failed' }
           Remove-Item -LiteralPath (Join-Path $audit 'launcher-metadata.json'), (Join-Path $audit 'gridstrike-metadata.json')
       - name: Package pinned development preview and audit PE imports
         shell: pwsh
@@ -65,7 +70,8 @@ jobs:
             --output "$env:RUNNER_TEMP/strike-development-preview" `
             --launcher-commit "$env:GITHUB_SHA" `
             --app-commit a4457c872b9fad0b492c30bf585cccfb4d25cd9e `
-            --dependency-inventory "$env:RUNNER_TEMP/strike-development-preview/dependency-inventory.json"
+            --dependency-inventory "$env:RUNNER_TEMP/strike-development-preview/dependency-inventory.json" `
+            --font-notices "$env:RUNNER_TEMP/strike-development-preview/font-notices"
           if ($LASTEXITCODE -ne 0) { throw 'preview packaging or import audit failed' }
       - uses: actions/upload-artifact@v4
         with:
@@ -93,6 +99,16 @@ jobs:
           $inventory = Join-Path $artifact $proof.dependency_inventory.name
           if ((Get-Item -LiteralPath $inventory).Length -ne $proof.dependency_inventory.bytes) { throw 'wrong dependency inventory length' }
           if ((Get-FileHash -Algorithm SHA256 -LiteralPath $inventory).Hash.ToLowerInvariant() -ne $proof.dependency_inventory.sha256) { throw 'wrong dependency inventory hash' }
+          $noticeManifest = Join-Path $artifact $proof.font_notice_manifest.name
+          if ((Get-Item -LiteralPath $noticeManifest).Length -ne $proof.font_notice_manifest.bytes) { throw 'wrong font notice manifest length' }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $noticeManifest).Hash.ToLowerInvariant() -ne $proof.font_notice_manifest.sha256) { throw 'wrong font notice manifest hash' }
+          $notices = Get-Content -LiteralPath $noticeManifest -Raw | ConvertFrom-Json
+          foreach ($group in @('launcher', 'gridstrike')) {
+            foreach ($entry in $notices.$group.files.PSObject.Properties) {
+              $notice = Join-Path $artifact "font-notices/$group/$($entry.Name)"
+              if ((Get-FileHash -Algorithm SHA256 -LiteralPath $notice).Hash.ToLowerInvariant() -ne $entry.Value) { throw "wrong font notice hash: $group/$($entry.Name)" }
+            }
+          }
           $cli = Join-Path $artifact 'pwds-strike-launcher.exe'
           $root = Join-Path $env:RUNNER_TEMP 'pwds-clean-preview-root'
           foreach ($version in @('0.5.0', '0.5.1')) {
