@@ -45,7 +45,9 @@ def collect(plan: dict, output: Path, fetcher=fetch_raw) -> dict:
                 raise ValueError(f"duplicate package coverage: {package}")
             covered.add(package)
         for name, expected_blob in source["files"].items():
-            if not FILENAME.fullmatch(name) or name in {".", ".."}:
+            path_parts = name.split("/")
+            if (not 1 <= len(path_parts) <= 2 or
+                    any(not FILENAME.fullmatch(part) or part in {".", ".."} for part in path_parts)):
                 raise ValueError(f"unsafe notice path: {name}")
             if not SHA1.fullmatch(expected_blob):
                 raise ValueError(f"invalid Git blob: {expected_blob}")
@@ -59,7 +61,7 @@ def collect(plan: dict, output: Path, fetcher=fetch_raw) -> dict:
             data.decode("utf-8")
             if git_blob_sha1(data) != expected_blob:
                 raise ValueError(f"Git blob mismatch: {url}")
-            relative = Path("sources") / repository / commit / name
+            relative = Path("sources") / repository / commit / Path(*path_parts)
             destination = output / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             if destination.exists() and destination.read_bytes() != data:

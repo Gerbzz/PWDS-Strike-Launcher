@@ -54,22 +54,22 @@
     },
     {
       "repository": "zakarumych/gpu-alloc", "commit": "61020bdcb4eb04fca6bbf748aeb9570e859236e0", "source_relation": "exact-vcs",
-      "files": {"COPYING": "1787983c037783b8855a688f5d9c0b6a2ec30b40", "license": "9fbdb5fca28b3d2082efaae631c14b80cd00207f"},
+      "files": {"COPYING": "1787983c037783b8855a688f5d9c0b6a2ec30b40", "license/APACHE": "690245e2787c89e4332ff4c674112bea22dc41e3", "license/MIT": "3746e3bb20fc30b6f07688c561b87ee1eb7a439d"},
       "covers": ["launcher:gpu-alloc 0.6.2"]
     },
     {
       "repository": "zakarumych/gpu-alloc", "commit": "7ddd1fe576fcfc503347eb97e476a47581479f22", "source_relation": "exact-vcs",
-      "files": {"COPYING": "1787983c037783b8855a688f5d9c0b6a2ec30b40", "license": "9fbdb5fca28b3d2082efaae631c14b80cd00207f"},
+      "files": {"COPYING": "1787983c037783b8855a688f5d9c0b6a2ec30b40", "license/APACHE": "690245e2787c89e4332ff4c674112bea22dc41e3", "license/MIT": "3746e3bb20fc30b6f07688c561b87ee1eb7a439d"},
       "covers": ["launcher:gpu-alloc-types 0.3.1"]
     },
     {
       "repository": "zakarumych/gpu-descriptor", "commit": "9f2fb9546591322e7b77ee1e79385e01effd85e4", "source_relation": "exact-vcs",
-      "files": {"COPYING": "9eca5fed017db6917cc476f67dcff36b0364bd48", "license": "edf00da0e10221b72b4e83098c07f2c7a57cc94b"},
+      "files": {"COPYING": "9eca5fed017db6917cc476f67dcff36b0364bd48", "license/APACHE": "cfaf4615fc4eafe17df4df25b135ae82a73f142d", "license/MIT": "6fb305333b5577c09ea210cdf2e1fcf6793e9b01"},
       "covers": ["launcher:gpu-descriptor-types 0.2.0"]
     },
     {
       "repository": "zakarumych/gpu-descriptor", "commit": "bb28b4e55b742e0ea3e7a0968e7ee6287ba0e06a", "source_relation": "exact-vcs",
-      "files": {"COPYING": "9eca5fed017db6917cc476f67dcff36b0364bd48", "license": "edf00da0e10221b72b4e83098c07f2c7a57cc94b"},
+      "files": {"COPYING": "9eca5fed017db6917cc476f67dcff36b0364bd48", "license/APACHE": "cfaf4615fc4eafe17df4df25b135ae82a73f142d", "license/MIT": "6fb305333b5577c09ea210cdf2e1fcf6793e9b01"},
       "covers": ["launcher:gpu-descriptor 0.3.2"]
     },
     {

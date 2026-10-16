@@ -38,6 +38,16 @@ class UpstreamNoticeTests(unittest.TestCase):
             self.assertEqual((output / file["collected_path"]).read_bytes(), data)
             self.assertEqual(result["covered_package_count"], 1)
 
+    def test_collects_nested_license_file_from_pinned_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "collection"
+            data = b"nested license\n"
+            fixture = self.fixture(data)
+            fixture["sources"][0]["files"] = {"license/MIT": git_blob_sha1(data)}
+            result = collect(fixture, output, lambda url: data)
+            self.assertEqual(result["files"][0]["name"], "license/MIT")
+            self.assertEqual((output / result["files"][0]["collected_path"]).read_bytes(), data)
+
     def test_rejects_wrong_blob_and_existing_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
