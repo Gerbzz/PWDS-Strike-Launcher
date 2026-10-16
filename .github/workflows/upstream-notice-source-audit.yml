@@ -1,0 +1,32 @@
+name: Upstream notice source audit
+
+on:
+  push:
+    branches: [feature/upstream-notice-sources]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  collect-pinned-upstream-notices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test pinned source collection
+        run: python -m unittest discover -s tools -p 'test_upstream_notice_sources.py' -v
+      - name: Fetch and verify small upstream notice texts
+        run: |
+          python tools/upstream_notice_sources.py \
+            --plan tools/upstream_notice_plan.json \
+            --output "$RUNNER_TEMP/upstream-notice-evidence"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upstream-notice-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/upstream-notice-evidence/
+          if-no-files-found: error
+          retention-days: 3
