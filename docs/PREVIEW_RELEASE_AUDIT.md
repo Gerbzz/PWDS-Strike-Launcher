@@ -15,6 +15,26 @@ its version `0.5.1` exists only to test update and rollback transactions.
 workflow records source commits, Rust compiler details, runner image, byte
 counts, SHA-256 hashes, and direct and delay-loaded PE DLL imports in
 `provenance.json`. `Cargo.lock` is enforced with `--locked` for both projects.
+The packager also checks that the launcher and GridStrike checkouts actually
+have the recorded commit IDs. `dependency-inventory.json` records the Windows
+Cargo normal/build dependency graph for each selected binary root, including
+package versions, declared license identifiers or license file names, and
+lockfile hashes. The independent consumer checks this inventory's length and
+SHA-256 against `provenance.json`. Raw Cargo metadata is not uploaded because
+it contains runner-specific local paths.
+
+This inventory is a review aid, not a notice-completeness finding. Cargo's
+resolved graph can contain feature variants that the binaries do not link;
+conversely, package metadata does not supply the text of each dependency's
+license or every attribution obligation. Its `missing_license_declarations`
+entries flag absent metadata for manual investigation. Dependency license
+texts and applicable notices have not yet been assembled into the ZIPs.
+The pinned lockfiles currently resolve 207 packages in the launcher graph and
+213 in the GridStrike graph. The launcher's root package is the sole entry
+without a license declaration. The graphs also include
+`epaint_default_fonts` with separate font license identifiers, which makes
+their notice text a specific item to check before distribution. These counts
+come from the selected Windows roots and are not a count of linked crates.
 The executable's bytes are not claimed bit-for-bit reproducible across
 different compilers or runner images.
 

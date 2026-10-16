@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import zipfile
@@ -33,6 +34,16 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def verify_commit(checkout: Path, claimed: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{40}", claimed):
+        raise ValueError(f"invalid commit ID for {checkout}: {claimed}")
+    actual = subprocess.check_output(
+        ["git", "-C", str(checkout), "rev-parse", "--verify", "HEAD"], text=True
+    ).strip()
+    if actual != claimed:
+        raise ValueError(f"commit mismatch for {checkout}: expected {claimed}, found {actual}")
+
+
 def make_zip(path: Path, contents: dict[str, bytes]) -> None:
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as output:
         for name in sorted(contents):
@@ -51,8 +62,21 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--launcher-commit", required=True)
     parser.add_argument("--app-commit", required=True)
+    parser.add_argument("--dependency-inventory", type=Path, required=True)
     args = parser.parse_args()
+    verify_commit(Path.cwd(), args.launcher_commit)
+    verify_commit(args.source, args.app_commit)
+    inventory = json.loads(args.dependency_inventory.read_text(encoding="utf-8"))
+    if (inventory.get("target") != "x86_64-pc-windows-msvc" or
+            {item["root"]: item["lock_sha256"] for item in inventory["projects"]} != {
+                "pwds-strike-launcher": sha256(Path("Cargo.lock")),
+                "gridcraft": sha256(args.source / "Cargo.lock"),
+            }):
+        raise ValueError("dependency inventory does not match preview lockfiles and target")
     args.output.mkdir(parents=True, exist_ok=True)
+    inventory_artifact = args.output / "dependency-inventory.json"
+    if args.dependency_inventory.resolve() != inventory_artifact.resolve():
+        shutil.copyfile(args.dependency_inventory, inventory_artifact)
 
     binaries = {"gridstrike.exe": args.app, "pwds-strike-launcher.exe": args.cli,
                 "pwds-strike-launcher-ui.exe": args.ui}
@@ -87,6 +111,11 @@ def main() -> None:
         "status": "DEVELOPMENT PREVIEW; no public release",
         "launcher_commit": args.launcher_commit,
         "gridstrike_commit": args.app_commit,
+        "dependency_inventory": {
+            "name": inventory_artifact.name,
+            "bytes": inventory_artifact.stat().st_size,
+            "sha256": sha256(inventory_artifact),
+        },
         "rustc": subprocess.check_output(["rustc", "--version", "--verbose"], text=True),
         "runner_image": os.environ.get("ImageVersion", "unknown"),
         "zip_metadata": "sorted paths; fixed 1980-01-01 timestamps; deflate level 9",
