@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import re
+import stat
 import tarfile
 import tomllib
 from pathlib import Path, PurePosixPath
@@ -17,10 +18,95 @@ from pathlib import Path, PurePosixPath
 LEGAL_NAME = re.compile(r"^(?:LICEN[CS]E|COPYING|NOTICE|OFL|UNLICENSE|PATENTS)(?:[._-].*)?$", re.I)
 MAX_TEXT = 1024 * 1024
 MAX_FILES_PER_PACKAGE = 64
+WINDOWS_DEVICES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                   *(f"LPT{i}" for i in range(1, 10))}
 
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def linked(status) -> bool:
+    return (stat.S_ISLNK(status.st_mode) or
+            bool(getattr(status, "st_file_attributes", 0) &
+                 getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)))
+
+
+def safe_component(part: str) -> None:
+    if (part in {"", ".", ".."} or any(char in part for char in "\\/:") or
+            part.rstrip(" .") != part or part.split(".", 1)[0].upper() in WINDOWS_DEVICES):
+        raise ValueError(f"unsafe notice path component: {part}")
+
+
+def checked_source_file(workspace_root: Path, item: Path) -> None:
+    """Validate every checkout component before opening a source file."""
+    root = workspace_root.absolute()
+    path = item.absolute()
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"source outside workspace: {item}") from exc
+    if not relative.parts:
+        raise ValueError(f"source is workspace directory: {item}")
+    if linked(root.lstat()) or not root.is_dir():
+        raise ValueError(f"unsafe workspace root: {root}")
+    resolved_root = root.resolve(strict=True)
+    current = root
+    for index, part in enumerate(relative.parts):
+        safe_component(part)
+        current = current / part
+        status = current.lstat()
+        if linked(status):
+            raise ValueError(f"symlink or reparse point in workspace source: {current}")
+        if index < len(relative.parts) - 1 and not stat.S_ISDIR(status.st_mode):
+            raise ValueError(f"non-directory workspace source parent: {current}")
+        if index == len(relative.parts) - 1 and not stat.S_ISREG(status.st_mode):
+            raise ValueError(f"non-regular workspace source: {current}")
+        try:
+            current.resolve(strict=True).relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValueError(f"source outside workspace: {current}") from exc
+
+
+def checked_output_file(output: Path, parts: tuple[str, ...], data: bytes) -> Path:
+    """Write inside an output tree only when its components are real directories."""
+    for part in parts:
+        safe_component(part)
+    output.mkdir(parents=True, exist_ok=True)
+    status = output.lstat()
+    if linked(status) or not stat.S_ISDIR(status.st_mode):
+        raise ValueError(f"unsafe output root: {output}")
+    resolved_root = output.resolve(strict=True)
+    current = output
+    for part in parts[:-1]:
+        current = current / part
+        try:
+            status = current.lstat()
+        except FileNotFoundError:
+            current.mkdir()
+            status = current.lstat()
+        if linked(status) or not stat.S_ISDIR(status.st_mode):
+            raise ValueError(f"symlink or reparse point in output parent: {current}")
+        try:
+            current.resolve(strict=True).relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValueError(f"output parent outside collection: {current}") from exc
+    destination = current / parts[-1]
+    try:
+        status = destination.lstat()
+    except FileNotFoundError:
+        with destination.open("xb") as stream:
+            stream.write(data)
+    else:
+        if linked(status) or not stat.S_ISREG(status.st_mode):
+            raise ValueError(f"unsafe existing output file: {destination}")
+        try:
+            destination.resolve(strict=True).relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValueError(f"output file outside collection: {destination}") from exc
+        if destination.read_bytes() != data:
+            raise ValueError(f"conflicting notice bytes: {destination}")
+    return destination
 
 
 def selected_packages(metadata: dict, root_name: str) -> list[dict]:
@@ -105,9 +191,9 @@ def registry_texts(package: dict, checksums: dict) -> tuple[str, list[tuple[str,
 
 def workspace_texts(package: dict, workspace_root: Path) -> list[tuple[str, bytes]]:
     manifest = Path(package["manifest_path"])
-    manifest.relative_to(workspace_root)  # refuse paths outside the checked-out workspace
+    checked_source_file(workspace_root, manifest)
     files = [item for item in workspace_root.iterdir()
-             if item.is_file() and candidate(PurePosixPath(item.name), None)]
+             if candidate(PurePosixPath(item.name), None)]
     declared = package.get("license_file")
     if declared:
         item = Path(declared)
@@ -115,6 +201,7 @@ def workspace_texts(package: dict, workspace_root: Path) -> list[tuple[str, byte
         files.append(item)
     texts = []
     for item in sorted(set(files)):
+        checked_source_file(workspace_root, item)
         data = item.read_bytes()
         if len(data) > MAX_TEXT:
             raise ValueError(f"oversize workspace notice: {item}")
@@ -141,16 +228,10 @@ def collect(metadata: dict, root_name: str, lockfile: Path, output: Path) -> dic
         files = []
         for relative, data in texts:
             parts = PurePosixPath(relative).parts
-            if any(part in {"", ".", ".."} or "\\" in part or ":" in part for part in parts):
-                raise ValueError(f"unsafe notice path: {relative}")
-            destination = output / "texts" / kind / package["name"] / package["version"]
+            prefix = ("texts", kind, package["name"], package["version"])
             if kind == "workspace":
-                destination = output / "texts" / kind / root_name
-            destination = destination.joinpath(*parts)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if destination.exists() and destination.read_bytes() != data:
-                raise ValueError(f"conflicting notice bytes: {destination}")
-            destination.write_bytes(data)
+                prefix = ("texts", kind, root_name)
+            destination = checked_output_file(output, prefix + parts, data)
             files.append({"source_path": relative,
                           "collected_path": destination.relative_to(output).as_posix(),
                           "bytes": len(data), "sha256": digest(data)})
@@ -175,7 +256,6 @@ def main() -> None:
     parser.add_argument("--launcher-commit", required=True)
     parser.add_argument("--app-commit", required=True)
     args = parser.parse_args()
-    args.output.mkdir(parents=True, exist_ok=True)
     report = {"status": "DEVELOPMENT PREVIEW; notice review incomplete",
               "scope": "Windows filtered normal/build Cargo graph; may include crates not linked into binaries",
               "target": "x86_64-pc-windows-msvc",
@@ -186,8 +266,8 @@ def main() -> None:
                   collect(json.loads(args.app_metadata.read_text(encoding="utf-8")),
                           "gridcraft", args.app_lock, args.output),
               ]}
-    manifest = args.output / "coverage.json"
-    manifest.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    checked_output_file(args.output, ("coverage.json",),
+                        (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     print(json.dumps({item["root"]: {"packages": item["package_count"],
                                      "with_source_text": item["source_text_count"],
                                      "metadata_only": item["metadata_only"]}

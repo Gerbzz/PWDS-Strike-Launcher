@@ -9,6 +9,17 @@ permissions:
   contents: read
 
 jobs:
+  linux-link-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify outside-source and linked-output rejection
+        run: python -m unittest discover -s tools -p 'test_notice_coverage.py' -v
+
   collect-windows-source-notices:
     runs-on: windows-latest
     timeout-minutes: 25

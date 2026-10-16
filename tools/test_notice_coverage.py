@@ -1,13 +1,28 @@
 import io
+import os
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 
-from notice_coverage import collect, digest, safe_relative
+from notice_coverage import collect, digest, safe_relative, workspace_texts
 
 
 class NoticeCoverageTests(unittest.TestCase):
+    def workspace_fixture(self, root: Path, *, declared: Path | None = None):
+        workspace = root / "workspace"
+        workspace.mkdir()
+        manifest = workspace / "Cargo.toml"
+        manifest.write_text("[package]\nname = 'example'\nversion = '1.0.0'\n")
+        package = {"id": "example 1.0.0 (path)", "name": "example", "version": "1.0.0",
+                   "source": None, "manifest_path": str(manifest), "license": "MIT",
+                   "license_file": str(declared) if declared else None}
+        metadata = {"workspace_root": str(workspace), "packages": [package],
+                    "resolve": {"nodes": [{"id": package["id"], "deps": []}]}}
+        lock = root / "Cargo.lock"
+        lock.write_text("[[package]]\nname = 'example'\nversion = '1.0.0'\n")
+        return workspace, package, metadata, lock
+
     def fixture(self, root: Path, members: dict[str, bytes], *, checksum: str | None = None):
         registry = root / "registry"
         source = registry / "src" / "test-index" / "example-1.0.0"
@@ -69,6 +84,50 @@ class NoticeCoverageTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unsafe crate member"):
                     collect(metadata, "example", lock, root / "output")
         self.assertIsNone(safe_relative("example-1.0.0", "example-1.0.0"))
+
+    def test_rejects_declared_workspace_parent_escape_before_read(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outside = root / "outside.txt"
+            outside.write_text("outside secret")
+            workspace, package, _, _ = self.workspace_fixture(root, declared=root / "workspace" / ".." / "outside.txt")
+            with self.assertRaisesRegex(ValueError, "outside|escape|unsafe"):
+                workspace_texts(package, workspace)
+
+    def test_rejects_workspace_license_symlink_to_outside(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outside = root / "outside.txt"
+            outside.write_text("outside secret")
+            workspace, package, _, _ = self.workspace_fixture(root)
+            try:
+                os.symlink(outside, workspace / "LICENSE")
+            except (OSError, NotImplementedError) as exc:
+                if os.name == "nt":
+                    self.skipTest(f"file symlink unavailable: {exc}")
+                raise
+            with self.assertRaisesRegex(ValueError, "symlink|reparse|unsafe"):
+                workspace_texts(package, workspace)
+
+    def test_rejects_linked_output_ancestor_without_writing_outside(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace, _, metadata, lock = self.workspace_fixture(root)
+            (workspace / "LICENSE").write_text("source license")
+            outside = root / "outside-output"
+            outside.mkdir()
+            output = root / "output"
+            linked_parent = output / "texts" / "workspace" / "example"
+            linked_parent.parent.mkdir(parents=True)
+            try:
+                os.symlink(outside, linked_parent, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                if os.name == "nt":
+                    self.skipTest(f"directory symlink unavailable: {exc}")
+                raise
+            with self.assertRaisesRegex(ValueError, "symlink|reparse|unsafe"):
+                collect(metadata, "example", lock, output)
+            self.assertFalse((outside / "LICENSE").exists())
 
 
 if __name__ == "__main__":
