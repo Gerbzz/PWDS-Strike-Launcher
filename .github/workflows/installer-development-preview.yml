@@ -2,7 +2,7 @@ name: Installer development preview
 
 on:
   push:
-    branches: [feature/verified-install-workflow, feature/launcher-preview-recovery-audit]
+    branches: [feature/verified-install-workflow, feature/launcher-preview-recovery-audit, feature/preview-provenance-inventory]
   workflow_dispatch:
 
 permissions:
@@ -22,6 +22,9 @@ jobs:
           repository: Gerbzz/GridStrike
           ref: a4457c872b9fad0b492c30bf585cccfb4d25cd9e
           path: gridstrike-source
+      - name: Test preview audit tooling
+        shell: pwsh
+        run: python -m unittest discover -s tools -p 'test_*.py' -v
       - name: Test launcher install transactions
         shell: pwsh
         run: cargo test --locked --features developer-preview
@@ -32,6 +35,24 @@ jobs:
       - name: Build launcher CLI and native UI
         shell: pwsh
         run: cargo build --locked --features native-ui,developer-preview --bins
+      - name: Inventory resolved Windows dependencies for notice review
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $audit = Join-Path $env:RUNNER_TEMP 'strike-development-preview'
+          New-Item -ItemType Directory -Force -Path $audit | Out-Null
+          cargo metadata --locked --format-version 1 --features native-ui,developer-preview --filter-platform x86_64-pc-windows-msvc > (Join-Path $audit 'launcher-metadata.json')
+          if ($LASTEXITCODE -ne 0) { throw 'launcher metadata failed' }
+          cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc --manifest-path gridstrike-source/Cargo.toml > (Join-Path $audit 'gridstrike-metadata.json')
+          if ($LASTEXITCODE -ne 0) { throw 'GridStrike metadata failed' }
+          python tools/dependency_inventory.py `
+            --launcher-metadata (Join-Path $audit 'launcher-metadata.json') `
+            --launcher-lock Cargo.lock `
+            --app-metadata (Join-Path $audit 'gridstrike-metadata.json') `
+            --app-lock gridstrike-source/Cargo.lock `
+            --output (Join-Path $audit 'dependency-inventory.json')
+          if ($LASTEXITCODE -ne 0) { throw 'dependency inventory failed' }
+          Remove-Item -LiteralPath (Join-Path $audit 'launcher-metadata.json'), (Join-Path $audit 'gridstrike-metadata.json')
       - name: Package pinned development preview and audit PE imports
         shell: pwsh
         run: |
@@ -43,7 +64,8 @@ jobs:
             --source gridstrike-source `
             --output "$env:RUNNER_TEMP/strike-development-preview" `
             --launcher-commit "$env:GITHUB_SHA" `
-            --app-commit a4457c872b9fad0b492c30bf585cccfb4d25cd9e
+            --app-commit a4457c872b9fad0b492c30bf585cccfb4d25cd9e `
+            --dependency-inventory "$env:RUNNER_TEMP/strike-development-preview/dependency-inventory.json"
           if ($LASTEXITCODE -ne 0) { throw 'preview packaging or import audit failed' }
       - uses: actions/upload-artifact@v4
         with:
@@ -68,6 +90,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $artifact = Join-Path $env:RUNNER_TEMP 'strike-preview-consumer'
           $proof = Get-Content -LiteralPath (Join-Path $artifact 'provenance.json') -Raw | ConvertFrom-Json
+          $inventory = Join-Path $artifact $proof.dependency_inventory.name
+          if ((Get-Item -LiteralPath $inventory).Length -ne $proof.dependency_inventory.bytes) { throw 'wrong dependency inventory length' }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $inventory).Hash.ToLowerInvariant() -ne $proof.dependency_inventory.sha256) { throw 'wrong dependency inventory hash' }
           $cli = Join-Path $artifact 'pwds-strike-launcher.exe'
           $root = Join-Path $env:RUNNER_TEMP 'pwds-clean-preview-root'
           foreach ($version in @('0.5.0', '0.5.1')) {
