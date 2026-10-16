@@ -7,7 +7,17 @@ crates' code is linked into the executable or whether notices are complete.
 import argparse
 import hashlib
 import json
+import subprocess
 from pathlib import Path
+
+
+def git_blob_sha256(lockfile: Path) -> str:
+    if lockfile.name != "Cargo.lock":
+        raise ValueError(f"expected Cargo.lock: {lockfile}")
+    content = subprocess.check_output(
+        ["git", "-C", str(lockfile.parent), "show", "HEAD:Cargo.lock"]
+    )
+    return hashlib.sha256(content).hexdigest()
 
 
 def inventory(metadata: dict, root_name: str, lockfile: Path) -> dict:
@@ -63,16 +73,17 @@ def main() -> None:
     parser.add_argument("--app-lock", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    launcher = inventory(json.loads(args.launcher_metadata.read_text(encoding="utf-8")),
+                         "pwds-strike-launcher", args.launcher_lock)
+    launcher["lock_git_blob_sha256"] = git_blob_sha256(args.launcher_lock)
+    app = inventory(json.loads(args.app_metadata.read_text(encoding="utf-8")),
+                    "gridcraft", args.app_lock)
+    app["lock_git_blob_sha256"] = git_blob_sha256(args.app_lock)
     report = {
         "status": "DEVELOPMENT PREVIEW; notice review incomplete",
         "target": "x86_64-pc-windows-msvc",
         "scope": "Cargo metadata normal/build dependency graph for the selected binary roots; platform filtered, may include feature variants not linked into the binaries",
-        "projects": [
-            inventory(json.loads(args.launcher_metadata.read_text(encoding="utf-8")),
-                      "pwds-strike-launcher", args.launcher_lock),
-            inventory(json.loads(args.app_metadata.read_text(encoding="utf-8")),
-                      "gridcraft", args.app_lock),
-        ],
+        "projects": [launcher, app],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

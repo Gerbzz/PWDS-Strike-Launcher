@@ -30,6 +30,11 @@ The current Rust installer was also exercised with a real GridStrike 0.5.0 packa
 ![Native launcher library after GridStrike preview uninstall](docs/screenshots/installer-gridstrike-preview-uninstalled.png)
 
 See the [installer capture provenance](docs/screenshots/README.md#installer-development-preview) for the exact package hash, source commit, and test boundary.
+The [synthetic update](docs/screenshots/installer-gridstrike-preview-synthetic-update.png)
+and [rollback](docs/screenshots/installer-gridstrike-preview-rolled-back.png)
+states were also captured on the Office PC with the prebuilt native launcher;
+their [provenance and limits](docs/screenshots/README.md#fresh-update-and-rollback-capture-2026-10-16)
+are recorded separately.
 
 ## Highlights
 

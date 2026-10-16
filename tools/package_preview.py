@@ -14,6 +14,8 @@ import subprocess
 import zipfile
 from pathlib import Path
 
+from dependency_inventory import git_blob_sha256
+from font_notices import NOTICE_SHA256, VERSIONS, verified_files
 from pe_imports import imports
 
 
@@ -44,6 +46,15 @@ def verify_commit(checkout: Path, claimed: str) -> None:
         raise ValueError(f"commit mismatch for {checkout}: expected {claimed}, found {actual}")
 
 
+def verify_tracked_checkout_clean(checkout: Path) -> None:
+    changes = subprocess.check_output(
+        ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"],
+        text=True,
+    ).strip()
+    if changes:
+        raise ValueError(f"tracked checkout differs from HEAD: {checkout}: {changes}")
+
+
 def make_zip(path: Path, contents: dict[str, bytes]) -> None:
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as output:
         for name in sorted(contents):
@@ -63,20 +74,37 @@ def main() -> None:
     parser.add_argument("--launcher-commit", required=True)
     parser.add_argument("--app-commit", required=True)
     parser.add_argument("--dependency-inventory", type=Path, required=True)
+    parser.add_argument("--font-notices", type=Path, required=True)
     args = parser.parse_args()
     verify_commit(Path.cwd(), args.launcher_commit)
     verify_commit(args.source, args.app_commit)
+    verify_tracked_checkout_clean(Path.cwd())
+    verify_tracked_checkout_clean(args.source)
     inventory = json.loads(args.dependency_inventory.read_text(encoding="utf-8"))
     if (inventory.get("target") != "x86_64-pc-windows-msvc" or
             {item["root"]: item["lock_sha256"] for item in inventory["projects"]} != {
                 "pwds-strike-launcher": sha256(Path("Cargo.lock")),
                 "gridcraft": sha256(args.source / "Cargo.lock"),
+            } or
+            {item["root"]: item["lock_git_blob_sha256"] for item in inventory["projects"]} != {
+                "pwds-strike-launcher": git_blob_sha256(Path("Cargo.lock")),
+                "gridcraft": git_blob_sha256(args.source / "Cargo.lock"),
             }):
         raise ValueError("dependency inventory does not match preview lockfiles and target")
+    notice_manifest = json.loads((args.font_notices / "manifest.json").read_text(encoding="utf-8"))
+    font_contents = {}
+    for group, version in VERSIONS.items():
+        if (notice_manifest[group]["version"] != version or
+                notice_manifest[group]["files"] != NOTICE_SHA256):
+            raise ValueError(f"unexpected {group} font notice manifest")
+        font_contents[group] = verified_files(args.font_notices / group)
     args.output.mkdir(parents=True, exist_ok=True)
     inventory_artifact = args.output / "dependency-inventory.json"
     if args.dependency_inventory.resolve() != inventory_artifact.resolve():
         shutil.copyfile(args.dependency_inventory, inventory_artifact)
+    font_artifact = args.output / "font-notices"
+    if args.font_notices.resolve() != font_artifact.resolve():
+        shutil.copytree(args.font_notices, font_artifact)
 
     binaries = {"gridstrike.exe": args.app, "pwds-strike-launcher.exe": args.cli,
                 "pwds-strike-launcher-ui.exe": args.ui}
@@ -97,6 +125,10 @@ def main() -> None:
 
     contents = {"gridstrike.exe": args.app.read_bytes()}
     contents.update({name: (args.source / name).read_bytes() for name in NOTICES})
+    contents.update({
+        f"THIRD_PARTY/epaint_default_fonts-{VERSIONS['gridstrike']}/{name}": data
+        for name, data in font_contents["gridstrike"].items()
+    })
     packages = {}
     for version, extra in (("0.5.0", {}),
                            ("0.5.1", {"SYNTHETIC-UPDATE.txt":
@@ -115,6 +147,11 @@ def main() -> None:
             "name": inventory_artifact.name,
             "bytes": inventory_artifact.stat().st_size,
             "sha256": sha256(inventory_artifact),
+        },
+        "font_notice_manifest": {
+            "name": "font-notices/manifest.json",
+            "bytes": (font_artifact / "manifest.json").stat().st_size,
+            "sha256": sha256(font_artifact / "manifest.json"),
         },
         "rustc": subprocess.check_output(["rustc", "--version", "--verbose"], text=True),
         "runner_image": os.environ.get("ImageVersion", "unknown"),
