@@ -50,8 +50,10 @@ The app source identifies its GridCraft donor and carries that donor's MIT
 and Apache licenses and notice. Its workspace and desktop manifest declare
 `MIT OR Apache-2.0`. The launcher repository has neither a distribution
 license file nor a `license` field in its Cargo manifest; the donor's choice
-does not declare the launcher's choice. The pinned GridStrike icon's three
-raster files first appear in Neil's commit `a4457c8`. The 256-pixel glyph is
+does not declare the launcher's choice. The pinned GridStrike app icon's three
+raster files first appear in Neil's [commit `4168549`](https://github.com/Gerbzz/GridStrike/commit/416854927d2a7bd02a778635dc6c37012580f518).
+The later pinned commit `a4457c8` changes `assets/branding/GridStrike.png`,
+not those three `assets/app-icon/` files. The 256-pixel glyph is
 visibly distinct from the donor GridCraft icon, but the repository has no
 editable source design or separate authorship record for it. ArtCraft
 trademark artwork is absent from the ZIP; the donor notice states that its
