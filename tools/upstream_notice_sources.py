@@ -50,7 +50,10 @@ def collect(plan: dict, output: Path, fetcher=fetch_raw) -> dict:
             if not SHA1.fullmatch(expected_blob):
                 raise ValueError(f"invalid Git blob: {expected_blob}")
             url = f"https://raw.githubusercontent.com/{repository}/{commit}/{name}"
-            data = fetcher(url)
+            try:
+                data = fetcher(url)
+            except Exception as exc:
+                raise ValueError(f"upstream source fetch failed: {url}") from exc
             if len(data) > MAX_TEXT:
                 raise ValueError(f"oversize upstream notice: {url}")
             data.decode("utf-8")
