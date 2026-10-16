@@ -21,8 +21,10 @@ source evidence, **not** proof that those five crates exactly match that tag.
 
 Two entries remain unresolved:
 
-- `hexf-parse 0.2.1` declares `CC0-1.0`, but its pinned upstream Git tree has
-  no root license or notice file.
+- `hexf-parse 0.2.1` declares `CC0-1.0`, but its pinned upstream Git tree and
+  locked crate archive have no license or notice text file. The
+  [version-specific evidence](HEXF_PARSE_NOTICE_EVIDENCE.md) distinguishes it
+  from the repository's later `0BSD` license file.
 - `pwds-strike-launcher 0.1.0` has no approved distribution license choice.
 
 The collected files are candidates for notice review. This audit makes no
