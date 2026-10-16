@@ -1,10 +1,9 @@
-# Native screenshot capture (draft branch)
+# Native screenshot capture
 
 The `pwds-strike-launcher-ui` binary accepts `--capture catalog NEW.png` or
 `--capture library NEW.png`. It renders the real egui window, waits for two
 frames, requests an egui native screenshot, writes a PNG at a new path, and
-closes. Capture mode selects the Glow renderer so a Windows runner without a
-WGPU adapter can attempt the same egui UI. Normal launch keeps WGPU. A missing screenshot, timeout, encoding error, or existing destination
+closes. Capture mode selects Glow on Linux and WGPU on Windows. A missing screenshot, timeout, encoding error, or existing destination
 returns a nonzero exit code. Running without arguments opens the ordinary UI.
 
 The [native preview workflow](../.github/workflows/native-preview.yml) builds

@@ -235,6 +235,144 @@ fn interrupted_update_before_activation_keeps_previous_version() {
 }
 
 #[test]
+fn interrupted_rename_can_adopt_exact_orphan_on_retry() {
+    let tmp = fixture();
+    let archive = tmp.path().join("app.zip");
+    let release = package(&archive, &[("gridstrike.exe", b"old")]);
+    let root = root(&tmp);
+    root.install_archive(
+        &InstallPlan {
+            release: &release,
+            is_update: false,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+
+    let mut update = package(&archive, &[("gridstrike.exe", b"new")]);
+    update.version = "2.0.0".into();
+    let orphan = tmp.path().join("launcher/apps/gridstrike/2.0.0");
+    fs::create_dir(&orphan).unwrap();
+    fs::write(orphan.join("gridstrike.exe"), b"new").unwrap();
+    root.install_archive(
+        &InstallPlan {
+            release: &update,
+            is_update: true,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(root.entrypoint("gridstrike").unwrap()).unwrap(),
+        b"new"
+    );
+    root.rollback("gridstrike").unwrap();
+    assert_eq!(
+        fs::read(root.entrypoint("gridstrike").unwrap()).unwrap(),
+        b"old"
+    );
+}
+
+#[test]
+fn interrupted_rename_never_adopts_changed_or_unknown_files() {
+    let tmp = fixture();
+    let archive = tmp.path().join("app.zip");
+    let release = package(&archive, &[("gridstrike.exe", b"old")]);
+    let root = root(&tmp);
+    root.install_archive(
+        &InstallPlan {
+            release: &release,
+            is_update: false,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+    let mut update = package(&archive, &[("gridstrike.exe", b"new")]);
+    update.version = "2.0.0".into();
+    let orphan = tmp.path().join("launcher/apps/gridstrike/2.0.0");
+    fs::create_dir(&orphan).unwrap();
+    fs::write(orphan.join("gridstrike.exe"), b"new").unwrap();
+    fs::write(orphan.join("user-project.txt"), b"preserve").unwrap();
+
+    assert!(
+        root.install_archive(
+            &InstallPlan {
+                release: &update,
+                is_update: true,
+            },
+            &archive,
+            &mut |_| true,
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs::read(root.entrypoint("gridstrike").unwrap()).unwrap(),
+        b"old"
+    );
+    assert_eq!(
+        fs::read(orphan.join("user-project.txt")).unwrap(),
+        b"preserve"
+    );
+}
+
+#[test]
+fn oversized_update_receipt_keeps_previous_install_usable() {
+    let tmp = fixture();
+    let archive = tmp.path().join("app.zip");
+    let release = package(&archive, &[("gridstrike.exe", b"old")]);
+    let root = root(&tmp);
+    root.install_archive(
+        &InstallPlan {
+            release: &release,
+            is_update: false,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+
+    let mut zip = ZipWriter::new(fs::File::create(&archive).unwrap());
+    zip.start_file("gridstrike.exe", SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"new").unwrap();
+    for index in 0..6800 {
+        let name = format!("res/{index:04}-{}.txt", "x".repeat(75));
+        zip.start_file(name, SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"x").unwrap();
+    }
+    zip.finish().unwrap();
+    let bytes = fs::read(&archive).unwrap();
+    let mut update = release.clone();
+    update.version = "2.0.0".into();
+    update.artifact_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    update.artifact_bytes = bytes.len() as u64;
+
+    let error = root
+        .install_archive(
+            &InstallPlan {
+                release: &update,
+                is_update: true,
+            },
+            &archive,
+            &mut |_| true,
+        )
+        .unwrap_err();
+    assert!(error.contains("installed state exceeds 1 MiB"), "{error}");
+    assert_eq!(
+        fs::read(root.entrypoint("gridstrike").unwrap()).unwrap(),
+        b"old"
+    );
+    assert_eq!(
+        root.state().unwrap().receipt("gridstrike").unwrap().version,
+        "1.0.0"
+    );
+    assert!(!tmp.path().join("launcher/apps/gridstrike/2.0.0").exists());
+}
+
+#[test]
 fn update_can_roll_back_to_previous_verified_version() {
     let tmp = fixture();
     let archive = tmp.path().join("app.zip");
@@ -268,6 +406,59 @@ fn update_can_roll_back_to_previous_verified_version() {
     assert_eq!(
         fs::read(root.entrypoint("gridstrike").unwrap()).unwrap(),
         b"old"
+    );
+}
+
+#[test]
+fn rollback_survives_interleaved_install_of_another_app() {
+    let tmp = fixture();
+    let archive = tmp.path().join("grid.zip");
+    let mut release = package(&archive, &[("gridstrike.exe", b"grid-one")]);
+    let root = root(&tmp);
+    root.install_archive(
+        &InstallPlan {
+            release: &release,
+            is_update: false,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+    release = package(&archive, &[("gridstrike.exe", b"grid-two")]);
+    release.version = "2.0.0".into();
+    root.install_archive(
+        &InstallPlan {
+            release: &release,
+            is_update: true,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+
+    let clip_archive = tmp.path().join("clip.zip");
+    let mut clip = package(&clip_archive, &[("clipstrike.exe", b"clip")]);
+    clip.app_id = "clipstrike".into();
+    clip.entrypoint = "clipstrike.exe".into();
+    root.install_archive(
+        &InstallPlan {
+            release: &clip,
+            is_update: false,
+        },
+        &clip_archive,
+        &mut |_| true,
+    )
+    .unwrap();
+
+    assert!(root.can_rollback("gridstrike"));
+    root.rollback("gridstrike").unwrap();
+    assert_eq!(
+        fs::read(root.entrypoint("gridstrike").unwrap()).unwrap(),
+        b"grid-one"
+    );
+    assert_eq!(
+        fs::read(root.entrypoint("clipstrike").unwrap()).unwrap(),
+        b"clip"
     );
 }
 
@@ -317,6 +508,36 @@ fn uninstall_refuses_unknown_files_and_keeps_receipt() {
     fs::write(&user_file, b"keep").unwrap();
     assert!(root.uninstall("gridstrike").is_err());
     assert_eq!(fs::read(&user_file).unwrap(), b"keep");
+    assert!(root.state().unwrap().receipt("gridstrike").is_some());
+}
+
+#[test]
+fn uninstall_refuses_case_colliding_unowned_file() {
+    let tmp = fixture();
+    let archive = tmp.path().join("app.zip");
+    let release = package(&archive, &[("gridstrike.exe", b"owned")]);
+    let root = root(&tmp);
+    root.install_archive(
+        &InstallPlan {
+            release: &release,
+            is_update: false,
+        },
+        &archive,
+        &mut |_| true,
+    )
+    .unwrap();
+    let version = tmp.path().join("launcher/apps/gridstrike/1.0.0");
+    let shadow = version.join("GRIDSTRIKE.EXE");
+    if shadow.exists() {
+        // Ordinary Windows directories are case-insensitive. The Linux CI job and Windows
+        // case-sensitive directories exercise the real two-file case.
+        return;
+    }
+    fs::write(&shadow, b"user file").unwrap();
+    let error = root.uninstall("gridstrike").unwrap_err();
+    assert!(error.contains("case-colliding"), "{error}");
+    assert_eq!(fs::read(version.join("gridstrike.exe")).unwrap(), b"owned");
+    assert_eq!(fs::read(&shadow).unwrap(), b"user file");
     assert!(root.state().unwrap().receipt("gridstrike").is_some());
 }
 

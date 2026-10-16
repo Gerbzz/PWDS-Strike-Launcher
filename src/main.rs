@@ -86,7 +86,11 @@ fn preview(args: &[String]) -> Result<(), String> {
             InstallRoot::open(Path::new(root))?.uninstall("gridstrike")?;
             println!("Development preview uninstalled; user data preserved.");
         }
-        _ => return Err("development preview usage: preview-install <version> <local-zip> <isolated-root> | preview-launch-version <isolated-root> | preview-uninstall <isolated-root>".into()),
+        [command, root] if command == "preview-rollback" => {
+            InstallRoot::open(Path::new(root))?.rollback("gridstrike")?;
+            println!("Development preview restored previous verified GridStrike version.");
+        }
+        _ => return Err("development preview usage: preview-install <version> <local-zip> <isolated-root> | preview-launch-version <isolated-root> | preview-rollback <isolated-root> | preview-uninstall <isolated-root>".into()),
     }
     Ok(())
 }
