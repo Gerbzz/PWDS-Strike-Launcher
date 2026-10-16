@@ -1,11 +1,17 @@
 use eframe::egui::{self, Color32, RichText};
 use pwds_strike_launcher::{
-    APPS, InstalledState, TrustedManifest, app, availability, bundled_manifest, current_target,
-    default_state_path,
+    APPS, InstallPlan, InstalledState, Release, TrustedManifest, app, availability,
+    bundled_manifest, current_target, default_state_path,
+    installer::{InstallRoot, Phase},
+    plan_install,
 };
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -18,8 +24,20 @@ struct LauncherUi {
     page: Page,
     manifest: Option<TrustedManifest>,
     state: Option<InstalledState>,
+    verified_ids: HashSet<String>,
     error: Option<String>,
+    root: Option<Arc<InstallRoot>>,
+    job: Option<UiJob>,
+    notice: Option<Result<String, String>>,
+    confirm_uninstall: Option<String>,
     capture: Option<CaptureOnce>,
+}
+
+struct UiJob {
+    app_id: String,
+    phase: Arc<Mutex<Phase>>,
+    cancel: Arc<AtomicBool>,
+    result: Arc<Mutex<Option<Result<(), String>>>>,
 }
 
 struct CaptureOnce {
@@ -33,18 +51,146 @@ struct CaptureOnce {
 impl LauncherUi {
     fn new() -> Self {
         let manifest = bundled_manifest();
-        let state = InstalledState::load(&default_state_path());
+        let root_path = {
+            #[cfg(feature = "developer-preview")]
+            {
+                std::env::var_os("PWDS_LAUNCHER_PREVIEW_ROOT")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| default_state_path().parent().unwrap().to_path_buf())
+            }
+            #[cfg(not(feature = "developer-preview"))]
+            {
+                default_state_path().parent().unwrap().to_path_buf()
+            }
+        };
+        let root = InstallRoot::open(&root_path).map(Arc::new);
+        let state = root
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|root| root.state());
         let error = manifest
             .as_ref()
             .err()
             .cloned()
-            .or_else(|| state.as_ref().err().cloned());
+            .or_else(|| state.as_ref().err().cloned())
+            .or_else(|| root.as_ref().err().cloned());
+        let verified_ids = match (&root, &state) {
+            (Ok(root), Ok(state)) => state
+                .installed
+                .iter()
+                .filter(|r| {
+                    (r.platform.as_str(), r.arch.as_str()) == current_target()
+                        && root.entrypoint(&r.app_id).is_ok()
+                })
+                .map(|r| r.app_id.clone())
+                .collect(),
+            _ => HashSet::new(),
+        };
         Self {
             page: Page::Catalog,
             manifest: manifest.ok(),
             state: state.ok(),
+            verified_ids,
             error,
+            root: root.ok(),
+            job: None,
+            notice: None,
+            confirm_uninstall: None,
             capture: None,
+        }
+    }
+
+    fn start_job(&mut self, id: &str, action: &str) {
+        if self.job.is_some() {
+            return;
+        }
+        let (Some(root), Some(manifest), Some(state)) = (&self.root, &self.manifest, &self.state)
+        else {
+            return;
+        };
+        let release: Option<(Release, bool)> = if action == "install" {
+            let (platform, arch) = current_target();
+            match plan_install(manifest, state, id, platform, arch) {
+                Ok(plan) => Some((plan.release.clone(), plan.is_update)),
+                Err(e) => {
+                    self.notice = Some(Err(e));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let root = Arc::clone(root);
+        let id_owned = id.to_string();
+        let phase = Arc::new(Mutex::new(Phase::Downloading));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = Arc::new(Mutex::new(None));
+        let thread_phase = Arc::clone(&phase);
+        let thread_cancel = Arc::clone(&cancel);
+        let thread_result = Arc::clone(&result);
+        let action_owned = action.to_string();
+        let job_id = id_owned.clone();
+        std::thread::spawn(move || {
+            let outcome = match action_owned.as_str() {
+                "install" => {
+                    let (release, is_update) = release.expect("install has a planned release");
+                    root.download_and_install(
+                        &InstallPlan {
+                            release: &release,
+                            is_update,
+                        },
+                        &mut |next| {
+                            *thread_phase.lock().unwrap() = next;
+                            !thread_cancel.load(Ordering::Relaxed)
+                        },
+                    )
+                }
+                "launch" => root.launch(&job_id, &[]).map(|_| ()),
+                "uninstall" => root.uninstall(&job_id),
+                "rollback" => root.rollback(&job_id),
+                _ => Err("unknown launcher action".into()),
+            };
+            *thread_result.lock().unwrap() = Some(outcome);
+        });
+        self.job = Some(UiJob {
+            app_id: id_owned,
+            phase,
+            cancel,
+            result,
+        });
+        self.notice = None;
+    }
+
+    fn poll_job(&mut self) {
+        let Some(job) = &self.job else {
+            return;
+        };
+        let result = job.result.lock().unwrap().take();
+        if let Some(result) = result {
+            let id = job.app_id.clone();
+            match self.root.as_ref().map(|root| root.state()) {
+                Some(Ok(state)) => {
+                    self.verified_ids = state
+                        .installed
+                        .iter()
+                        .filter(|r| {
+                            (r.platform.as_str(), r.arch.as_str()) == current_target()
+                                && self
+                                    .root
+                                    .as_ref()
+                                    .is_some_and(|root| root.entrypoint(&r.app_id).is_ok())
+                        })
+                        .map(|r| r.app_id.clone())
+                        .collect();
+                    self.state = Some(state);
+                    self.notice = Some(result.map(|_| format!("{id}: operation complete")));
+                }
+                Some(Err(error)) => {
+                    self.notice = Some(Err(format!("cannot refresh library: {error}")))
+                }
+                None => self.notice = Some(Err("install root unavailable".into())),
+            }
+            self.job = None;
         }
     }
 
@@ -155,7 +301,7 @@ impl LauncherUi {
         );
     }
 
-    fn catalog(&self, ui: &mut egui::Ui) {
+    fn catalog(&mut self, ui: &mut egui::Ui) {
         let (Some(manifest), Some(state)) = (&self.manifest, &self.state) else {
             return;
         };
@@ -165,8 +311,9 @@ impl LauncherUi {
                 .size(23.0)
                 .strong(),
         );
-        ui.label("One catalog for the Strike family. Downloads open when verified releases and the installer are ready.");
+        ui.label("Choose a verified Strike release to install. Apps without a packaged release are coming soon.");
         ui.add_space(14.0);
+        let mut selected = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for item in APPS {
                 egui::Frame::group(ui.style())
@@ -192,20 +339,38 @@ impl LauncherUi {
                             });
                         });
                         ui.add_space(5.0);
-                        ui.add_enabled(false, egui::Button::new("Install / update unavailable"));
+                        let available = plan_install(manifest, state, item.id, platform, arch)
+                            .is_ok()
+                            && (state.receipt(item.id).is_none()
+                                || self.verified_ids.contains(item.id));
+                        let label = if state.receipt(item.id).is_some() {
+                            "Update"
+                        } else {
+                            "Install"
+                        };
+                        if ui
+                            .add_enabled(available && self.job.is_none(), egui::Button::new(label))
+                            .clicked()
+                        {
+                            selected = Some(item.id);
+                        }
                     });
                 ui.add_space(8.0);
             }
         });
+        if let Some(id) = selected {
+            self.start_job(id, "install");
+        }
     }
 
-    fn library(&self, ui: &mut egui::Ui) {
+    fn library(&mut self, ui: &mut egui::Ui) {
         let Some(state) = &self.state else {
             return;
         };
         ui.label(RichText::new("Your library").size(23.0).strong());
-        ui.label("Launcher-managed installations appear here. App documents and settings stay yours when an uninstall flow is added.");
+        ui.label("Launcher-managed installations appear here. Uninstall preserves your documents and settings.");
         ui.add_space(12.0);
+        let mut action = None;
         if state.installed.is_empty() {
             ui.label("No launcher-managed apps installed yet.");
         }
@@ -223,20 +388,70 @@ impl LauncherUi {
                             receipt.version, receipt.platform, receipt.arch
                         ));
                         ui.horizontal(|ui| {
-                            ui.add_enabled(false, egui::Button::new("Launch"));
-                            ui.add_enabled(false, egui::Button::new("Update"));
-                            ui.add_enabled(false, egui::Button::new("Uninstall"));
+                            let idle =
+                                self.job.is_none() && self.verified_ids.contains(&receipt.app_id);
+                            if self.job.is_none() && !idle {
+                                let message = if (receipt.platform.as_str(), receipt.arch.as_str())
+                                    != current_target()
+                                {
+                                    "Installed for another platform"
+                                } else {
+                                    "Installation needs verification or repair"
+                                };
+                                ui.colored_label(Color32::LIGHT_RED, message);
+                            }
+                            if ui.add_enabled(idle, egui::Button::new("Launch")).clicked() {
+                                action = Some((receipt.app_id.clone(), "launch"));
+                            }
+                            let (platform, arch) = current_target();
+                            let update = self.manifest.as_ref().is_some_and(|manifest| {
+                                plan_install(manifest, state, &receipt.app_id, platform, arch)
+                                    .is_ok()
+                            });
+                            if ui
+                                .add_enabled(idle && update, egui::Button::new("Update"))
+                                .clicked()
+                            {
+                                action = Some((receipt.app_id.clone(), "install"));
+                            }
+                            let rollback = self
+                                .root
+                                .as_ref()
+                                .is_some_and(|root| root.can_rollback(&receipt.app_id));
+                            if ui
+                                .add_enabled(idle && rollback, egui::Button::new("Rollback"))
+                                .clicked()
+                            {
+                                action = Some((receipt.app_id.clone(), "rollback"));
+                            }
+                            if ui
+                                .add_enabled(idle, egui::Button::new("Uninstall"))
+                                .clicked()
+                            {
+                                action = Some((receipt.app_id.clone(), "confirm-uninstall"));
+                            }
                         });
                     });
                 });
             });
             ui.add_space(8.0);
         }
+        if let Some((id, operation)) = action {
+            if operation == "confirm-uninstall" {
+                self.confirm_uninstall = Some(id);
+            } else {
+                self.start_job(&id, operation);
+            }
+        }
     }
 }
 
 impl eframe::App for LauncherUi {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_job();
+        if self.job.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         ctx.set_visuals(egui::Visuals::dark());
         egui::TopBottomPanel::top("brand").show(ctx, |ui| {
             ui.add_space(12.0);
@@ -251,6 +466,13 @@ impl eframe::App for LauncherUi {
                 ui.label(RichText::new("Strike Launcher").size(24.0).strong());
             });
             ui.label(RichText::new("The Strike family, in one place").color(Color32::LIGHT_GRAY));
+            #[cfg(feature = "developer-preview")]
+            if std::env::var_os("PWDS_LAUNCHER_PREVIEW_ROOT").is_some() {
+                ui.colored_label(
+                    Color32::YELLOW,
+                    "DEVELOPMENT PREVIEW - locally built package, not a public release",
+                );
+            }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.page, Page::Catalog, "Catalog");
@@ -258,6 +480,66 @@ impl eframe::App for LauncherUi {
             });
             ui.add_space(6.0);
         });
+        egui::TopBottomPanel::bottom("operations").show(ctx, |ui| {
+            if let Some(job) = &self.job {
+                let phase = *job.phase.lock().unwrap();
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    match phase {
+                        Phase::DownloadBytes(done, total) => {
+                            ui.label(format!("{}: downloading {done}/{total} bytes", job.app_id));
+                        }
+                        Phase::ExtractedEntries(done, total) => {
+                            ui.label(format!("{}: extracting {done}/{total} entries", job.app_id));
+                        }
+                        other => {
+                            ui.label(format!("{}: {other:?}", job.app_id));
+                        }
+                    }
+                    if ui
+                        .add_enabled(phase != Phase::Activating, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        job.cancel.store(true, Ordering::Relaxed);
+                    }
+                });
+            }
+            if let Some(notice) = &self.notice {
+                match notice {
+                    Ok(message) => {
+                        ui.colored_label(Color32::LIGHT_GREEN, message);
+                    }
+                    Err(message) => {
+                        ui.colored_label(Color32::LIGHT_RED, message);
+                    }
+                }
+            }
+        });
+        if let Some(id) = self.confirm_uninstall.clone() {
+            let mut confirm = false;
+            let mut close = false;
+            egui::Window::new("Uninstall Strike app")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("Remove the launcher-owned version of {id}?"));
+                    ui.label("Your documents and settings will be preserved.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Uninstall").clicked() {
+                            confirm = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.confirm_uninstall = None;
+            }
+            if confirm {
+                self.start_job(&id, "uninstall");
+            }
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(error) = &self.error {
                 ui.colored_label(
@@ -304,7 +586,7 @@ fn run() -> Result<(), String> {
     let captured = capture.is_some();
     let result = Arc::clone(&outcome);
     let options = eframe::NativeOptions {
-        renderer: if captured {
+        renderer: if captured && !cfg!(target_os = "windows") {
             eframe::Renderer::Glow
         } else {
             eframe::Renderer::Wgpu

@@ -1,6 +1,8 @@
 # Release and installation contract
 
-This is a design gate for a future executor. The current executable **does not install anything**.
+The Rust executor now implements the per-user ZIP workflow below, but the bundled public release manifest remains empty. Default builds cannot install a catalog app until a reviewed release record is embedded. The opt-in `developer-preview` build accepts a local GridStrike ZIP and an isolated install root for CI evidence only.
+
+The executor covers bounded download, pinned size/hash verification, ZIP path and file-type checks, same-volume staging, receipt-backed activation and recovery, direct launch, explicit rollback, and inventoried uninstall. The UI shows phase and byte progress, errors, cancellation before activation, and an uninstall confirmation. The hosted development preview is not publisher identity or public release evidence.
 
 ## Release authority
 
@@ -22,7 +24,7 @@ Linux/macOS adapters can implement platform-specific data paths, activation and 
 
 ## Receipt boundary
 
-`InstalledState` currently **reads** a versioned `installed.json`; it does not create receipts. Future transaction code must write receipts only after a verified commit, with app ID, version, target, and relative entrypoint matching the installed bundle. A receipt file by itself must not authorize launching arbitrary paths. The launcher should reconcile it with the versioned directory, ownership record and verified file hashes before enabling launch, update or uninstall.
+`InstalledState` reads and writes a versioned `installed.json`. The executor writes a receipt only after verifying and staging the archive, with app ID, version, target, relative entrypoint, and a SHA-256 inventory for every file. Launch, update, rollback, and uninstall recheck the directory against that inventory. Legacy receipts without an inventory cannot authorize those actions. Previous verified receipts remain in the state for rollback and complete uninstall after multiple updates.
 
 ## Logo and branding gate
 
