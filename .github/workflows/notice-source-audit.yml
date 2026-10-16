@@ -1,0 +1,56 @@
+name: Preview notice source audit
+
+on:
+  push:
+    branches: [feature/dependency-notice-coverage]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  collect-windows-source-notices:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Gerbzz/GridStrike
+          ref: a4457c872b9fad0b492c30bf585cccfb4d25cd9e
+          path: gridstrike-source
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check exact app source and collector regressions
+        shell: pwsh
+        run: |
+          if ((git -C gridstrike-source rev-parse HEAD) -ne 'a4457c872b9fad0b492c30bf585cccfb4d25cd9e') { throw 'unexpected GridStrike source' }
+          python -m unittest discover -s tools -p 'test_notice_coverage.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'notice collector regressions failed' }
+      - name: Collect checked archive texts and coverage manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $audit = Join-Path $env:RUNNER_TEMP 'notice-source-audit'
+          New-Item -ItemType Directory -Force -Path $audit | Out-Null
+          cargo metadata --locked --format-version 1 --features native-ui,developer-preview --filter-platform x86_64-pc-windows-msvc > (Join-Path $audit 'launcher-metadata.json')
+          if ($LASTEXITCODE -ne 0) { throw 'launcher metadata failed' }
+          cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc --manifest-path gridstrike-source/Cargo.toml > (Join-Path $audit 'gridstrike-metadata.json')
+          if ($LASTEXITCODE -ne 0) { throw 'GridStrike metadata failed' }
+          python tools/notice_coverage.py `
+            --launcher-metadata (Join-Path $audit 'launcher-metadata.json') `
+            --launcher-lock Cargo.lock `
+            --app-metadata (Join-Path $audit 'gridstrike-metadata.json') `
+            --app-lock gridstrike-source/Cargo.lock `
+            --output (Join-Path $audit 'collection') `
+            --launcher-commit "$env:GITHUB_SHA" `
+            --app-commit a4457c872b9fad0b492c30bf585cccfb4d25cd9e
+          if ($LASTEXITCODE -ne 0) { throw 'notice collection failed' }
+          Remove-Item -LiteralPath (Join-Path $audit 'launcher-metadata.json'), (Join-Path $audit 'gridstrike-metadata.json')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notice-source-audit-${{ github.sha }}
+          path: ${{ runner.temp }}/notice-source-audit/collection/
+          if-no-files-found: error
+          retention-days: 3
