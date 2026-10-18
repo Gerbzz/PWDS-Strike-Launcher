@@ -16,11 +16,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check fixture CLI and normal installer transactions
         run: cargo test --locked --features native-ui,ui-local-fixture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-ui-local-fixture-${{ github.sha }}
+          path: target/debug/pwds-strike-launcher-ui.exe
+          if-no-files-found: error
+          retention-days: 3
       - name: Build production-shaped UI without fixture authority
         run: cargo build --locked --features native-ui,developer-preview --bin pwds-strike-launcher-ui
       - name: Reject local fixture flag without opt-in feature
         shell: pwsh
         run: |
-          $output = & target/debug/pwds-strike-launcher-ui.exe --check-local-fixture 2>&1 | Out-String
-          if ($LASTEXITCODE -eq 0) { throw 'production-shaped UI accepted fixture flag' }
-          if ($output -notmatch 'usage: pwds-strike-launcher-ui') { throw 'unexpected fixture rejection: ' + $output }
+          python -c "import subprocess; p=subprocess.run(['target/debug/pwds-strike-launcher-ui.exe','--check-local-fixture'],capture_output=True,text=True); assert p.returncode != 0 and 'usage: pwds-strike-launcher-ui' in p.stderr, (p.returncode,p.stdout,p.stderr)"

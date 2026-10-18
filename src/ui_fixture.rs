@@ -215,6 +215,9 @@ pub fn check_isolated_root(path: &Path) -> Result<(), String> {
             if !marker_meta.is_file() || linked(&marker_meta) {
                 return Err("fixture root marker is not a real file".into());
             }
+            if marker_meta.len() != MARKER.len() as u64 {
+                return Err("fixture root marker mismatch".into());
+            }
             if fs::read(marker).map_err(|e| format!("read fixture root marker: {e}"))?
                 != MARKER.as_bytes()
             {
