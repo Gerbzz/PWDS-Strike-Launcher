@@ -1,4 +1,6 @@
 use eframe::egui::{self, Color32, RichText};
+#[cfg(feature = "ui-local-fixture")]
+use pwds_strike_launcher::ui_fixture::{FixtureSet, check_isolated_root, open_isolated_root};
 use pwds_strike_launcher::{
     APPS, InstallPlan, InstalledState, Release, TrustedManifest, app, availability,
     bundled_manifest, current_target, default_state_path,
@@ -31,6 +33,8 @@ struct LauncherUi {
     notice: Option<Result<String, String>>,
     confirm_uninstall: Option<String>,
     capture: Option<CaptureOnce>,
+    #[cfg(feature = "ui-local-fixture")]
+    fixture: Option<Arc<FixtureSet>>,
 }
 
 struct UiJob {
@@ -49,7 +53,10 @@ struct CaptureOnce {
 }
 
 impl LauncherUi {
-    fn new() -> Self {
+    fn new(
+        #[cfg(feature = "ui-local-fixture")] fixture: Option<Arc<FixtureSet>>,
+        #[cfg(feature = "ui-local-fixture")] fixture_root: Option<Arc<InstallRoot>>,
+    ) -> Self {
         let manifest = bundled_manifest();
         let root_path = {
             #[cfg(feature = "developer-preview")]
@@ -63,6 +70,12 @@ impl LauncherUi {
                 default_state_path().parent().unwrap().to_path_buf()
             }
         };
+        #[cfg(feature = "ui-local-fixture")]
+        let root = match fixture_root {
+            Some(root) => Ok(root),
+            None => InstallRoot::open(&root_path).map(Arc::new),
+        };
+        #[cfg(not(feature = "ui-local-fixture"))]
         let root = InstallRoot::open(&root_path).map(Arc::new);
         let state = root
             .as_ref()
@@ -97,6 +110,8 @@ impl LauncherUi {
             notice: None,
             confirm_uninstall: None,
             capture: None,
+            #[cfg(feature = "ui-local-fixture")]
+            fixture,
         }
     }
 
@@ -108,10 +123,24 @@ impl LauncherUi {
         else {
             return;
         };
+        #[cfg(feature = "ui-local-fixture")]
+        let fixture = self.fixture.clone();
         let release: Option<(Release, bool)> = if action == "install" {
             let (platform, arch) = current_target();
-            match plan_install(manifest, state, id, platform, arch) {
-                Ok(plan) => Some((plan.release.clone(), plan.is_update)),
+            #[cfg(feature = "ui-local-fixture")]
+            let planned = if let Some(local) = &fixture {
+                local
+                    .plan(state, id)
+                    .map(|plan| (plan.release.clone(), plan.is_update))
+            } else {
+                plan_install(manifest, state, id, platform, arch)
+                    .map(|plan| (plan.release.clone(), plan.is_update))
+            };
+            #[cfg(not(feature = "ui-local-fixture"))]
+            let planned = plan_install(manifest, state, id, platform, arch)
+                .map(|plan| (plan.release.clone(), plan.is_update));
+            match planned {
+                Ok(plan) => Some(plan),
                 Err(e) => {
                     self.notice = Some(Err(e));
                     return;
@@ -122,7 +151,15 @@ impl LauncherUi {
         };
         let root = Arc::clone(root);
         let id_owned = id.to_string();
-        let phase = Arc::new(Mutex::new(Phase::Downloading));
+        #[cfg(feature = "ui-local-fixture")]
+        let initial_phase = if fixture.is_some() {
+            Phase::Verifying
+        } else {
+            Phase::Downloading
+        };
+        #[cfg(not(feature = "ui-local-fixture"))]
+        let initial_phase = Phase::Downloading;
+        let phase = Arc::new(Mutex::new(initial_phase));
         let cancel = Arc::new(AtomicBool::new(false));
         let result = Arc::new(Mutex::new(None));
         let thread_phase = Arc::clone(&phase);
@@ -134,6 +171,27 @@ impl LauncherUi {
             let outcome = match action_owned.as_str() {
                 "install" => {
                     let (release, is_update) = release.expect("install has a planned release");
+                    #[cfg(feature = "ui-local-fixture")]
+                    if let Some(local) = fixture {
+                        local
+                            .install_next(&root, &mut |next| {
+                                *thread_phase.lock().unwrap() = next;
+                                !thread_cancel.load(Ordering::Relaxed)
+                            })
+                            .map(|_| ())
+                    } else {
+                        root.download_and_install(
+                            &InstallPlan {
+                                release: &release,
+                                is_update,
+                            },
+                            &mut |next| {
+                                *thread_phase.lock().unwrap() = next;
+                                !thread_cancel.load(Ordering::Relaxed)
+                            },
+                        )
+                    }
+                    #[cfg(not(feature = "ui-local-fixture"))]
                     root.download_and_install(
                         &InstallPlan {
                             release: &release,
@@ -330,17 +388,30 @@ impl LauncherUi {
                                         .color(Color32::from_rgb(109, 196, 208)),
                                 );
                                 ui.label(item.description);
+                                #[cfg(feature = "ui-local-fixture")]
+                                let status = if self.fixture.is_some() && item.id == "gridstrike" {
+                                    "Explicitly pinned local development fixture"
+                                } else {
+                                    availability(manifest, state, item.id, platform, arch)
+                                };
+                                #[cfg(not(feature = "ui-local-fixture"))]
+                                let status = availability(manifest, state, item.id, platform, arch);
                                 ui.label(
-                                    RichText::new(availability(
-                                        manifest, state, item.id, platform, arch,
-                                    ))
-                                    .color(Color32::from_rgb(202, 177, 114)),
+                                    RichText::new(status).color(Color32::from_rgb(202, 177, 114)),
                                 );
                             });
                         });
                         ui.add_space(5.0);
-                        let available = plan_install(manifest, state, item.id, platform, arch)
-                            .is_ok()
+                        #[cfg(feature = "ui-local-fixture")]
+                        let planned = if let Some(local) = &self.fixture {
+                            local.plan(state, item.id).is_ok()
+                        } else {
+                            plan_install(manifest, state, item.id, platform, arch).is_ok()
+                        };
+                        #[cfg(not(feature = "ui-local-fixture"))]
+                        let planned =
+                            plan_install(manifest, state, item.id, platform, arch).is_ok();
+                        let available = planned
                             && (state.receipt(item.id).is_none()
                                 || self.verified_ids.contains(item.id));
                         let label = if state.receipt(item.id).is_some() {
@@ -404,6 +475,16 @@ impl LauncherUi {
                                 action = Some((receipt.app_id.clone(), "launch"));
                             }
                             let (platform, arch) = current_target();
+                            #[cfg(feature = "ui-local-fixture")]
+                            let update = if let Some(local) = &self.fixture {
+                                local.plan(state, &receipt.app_id).is_ok()
+                            } else {
+                                self.manifest.as_ref().is_some_and(|manifest| {
+                                    plan_install(manifest, state, &receipt.app_id, platform, arch)
+                                        .is_ok()
+                                })
+                            };
+                            #[cfg(not(feature = "ui-local-fixture"))]
                             let update = self.manifest.as_ref().is_some_and(|manifest| {
                                 plan_install(manifest, state, &receipt.app_id, platform, arch)
                                     .is_ok()
@@ -467,7 +548,18 @@ impl eframe::App for LauncherUi {
             });
             ui.label(RichText::new("The Strike family, in one place").color(Color32::LIGHT_GRAY));
             #[cfg(feature = "developer-preview")]
-            if std::env::var_os("PWDS_LAUNCHER_PREVIEW_ROOT").is_some() {
+            if std::env::var_os("PWDS_LAUNCHER_PREVIEW_ROOT").is_some()
+                || cfg!(feature = "ui-local-fixture") && {
+                    #[cfg(feature = "ui-local-fixture")]
+                    {
+                        self.fixture.is_some()
+                    }
+                    #[cfg(not(feature = "ui-local-fixture"))]
+                    {
+                        false
+                    }
+                }
+            {
                 ui.colored_label(
                     Color32::YELLOW,
                     "DEVELOPMENT PREVIEW - locally built package, not a public release",
@@ -566,6 +658,31 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg(feature = "ui-local-fixture")]
+    let fixture_launch: Option<(Arc<FixtureSet>, Arc<InstallRoot>)> = match args.as_slice() {
+        [flag, spec, root] if flag == "--check-local-fixture" => {
+            let fixture = FixtureSet::load(Path::new(spec))?;
+            check_isolated_root(Path::new(root))?;
+            println!(
+                "GridStrike {} local fixture verified; isolated root available",
+                fixture.first_version()
+            );
+            return Ok(());
+        }
+        [flag, spec, root] if flag == "--local-fixture-install" => {
+            let fixture = FixtureSet::load(Path::new(spec))?;
+            let root = open_isolated_root(Path::new(root))?;
+            let version = fixture.install_next(&root, &mut |_| true)?;
+            println!("GridStrike {version} installed from pinned local UI fixture");
+            return Ok(());
+        }
+        [flag, spec, root] if flag == "--local-fixture" => {
+            let fixture = Arc::new(FixtureSet::load(Path::new(spec))?);
+            let root = Arc::new(open_isolated_root(Path::new(root))?);
+            Some((fixture, root))
+        }
+        _ => None,
+    };
     let capture = match args.as_slice() {
         [] => None,
         [flag, page, output] if flag == "--capture" => {
@@ -576,6 +693,8 @@ fn run() -> Result<(), String> {
             };
             Some((page, PathBuf::from(output)))
         }
+        #[cfg(feature = "ui-local-fixture")]
+        [flag, _, _] if flag == "--local-fixture" => None,
         _ => {
             return Err(
                 "usage: pwds-strike-launcher-ui [--capture catalog|library NEW.png]".into(),
@@ -600,6 +719,12 @@ fn run() -> Result<(), String> {
         "PWDS Strike Launcher",
         options,
         Box::new(move |_| {
+            #[cfg(feature = "ui-local-fixture")]
+            let mut app = match fixture_launch {
+                Some((fixture, root)) => LauncherUi::new(Some(fixture), Some(root)),
+                None => LauncherUi::new(None, None),
+            };
+            #[cfg(not(feature = "ui-local-fixture"))]
             let mut app = LauncherUi::new();
             if let Some((page, path)) = capture {
                 app.page = page;

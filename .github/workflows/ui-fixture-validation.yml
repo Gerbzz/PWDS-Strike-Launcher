@@ -1,0 +1,30 @@
+name: UI local fixture validation
+
+on:
+  push:
+    branches: [feature/fixture-notice-evidence]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-fixture:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check fixture CLI and normal installer transactions
+        run: cargo test --locked --features native-ui,ui-local-fixture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-ui-local-fixture-${{ github.sha }}
+          path: target/debug/pwds-strike-launcher-ui.exe
+          if-no-files-found: error
+          retention-days: 3
+      - name: Build production-shaped UI without fixture authority
+        run: cargo build --locked --features native-ui,developer-preview --bin pwds-strike-launcher-ui
+      - name: Reject local fixture flag without opt-in feature
+        shell: pwsh
+        run: |
+          python tests/check_production_fixture_gate.py target/debug/pwds-strike-launcher-ui.exe

@@ -9,6 +9,7 @@ description = "PWDS Strike Launcher source foundation"
 default = []
 native-ui = ["dep:eframe", "dep:png"]
 developer-preview = []
+ui-local-fixture = ["developer-preview"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

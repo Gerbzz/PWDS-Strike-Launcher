@@ -1,6 +1,8 @@
 //! Shared catalog, installed-state view, and pinned release planning.
 
 pub mod installer;
+#[cfg(feature = "ui-local-fixture")]
+pub mod ui_fixture;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
