@@ -27,4 +27,4 @@ jobs:
       - name: Reject local fixture flag without opt-in feature
         shell: pwsh
         run: |
-          python -c "import subprocess; p=subprocess.run(['target/debug/pwds-strike-launcher-ui.exe','--check-local-fixture'],capture_output=True,text=True); assert p.returncode != 0 and 'usage: pwds-strike-launcher-ui' in p.stderr, (p.returncode,p.stdout,p.stderr)"
+          python tests/check_production_fixture_gate.py target/debug/pwds-strike-launcher-ui.exe
