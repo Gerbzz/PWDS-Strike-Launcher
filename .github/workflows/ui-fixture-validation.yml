@@ -1,6 +1,8 @@
 name: UI local fixture validation
 
 on:
+  push:
+    branches: [feature/fixture-notice-evidence]
   workflow_dispatch:
 
 permissions:
