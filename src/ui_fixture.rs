@@ -210,6 +210,11 @@ pub fn check_isolated_root(path: &Path) -> Result<(), String> {
                 return Err("fixture root is not a real directory".into());
             }
             let marker = path.join(MARKER_NAME);
+            let marker_meta = fs::symlink_metadata(&marker)
+                .map_err(|e| format!("inspect fixture root marker: {e}"))?;
+            if !marker_meta.is_file() || linked(&marker_meta) {
+                return Err("fixture root marker is not a real file".into());
+            }
             if fs::read(marker).map_err(|e| format!("read fixture root marker: {e}"))?
                 != MARKER.as_bytes()
             {

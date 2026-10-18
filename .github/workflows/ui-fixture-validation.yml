@@ -15,4 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check fixture CLI and normal installer transactions
-        run: cargo test --locked --features native-ui,ui-local-fixture --test ui_fixture_cli
+        run: cargo test --locked --features native-ui,ui-local-fixture
+      - name: Build production-shaped UI without fixture authority
+        run: cargo build --locked --features native-ui,developer-preview --bin pwds-strike-launcher-ui
+      - name: Reject local fixture flag without opt-in feature
+        shell: pwsh
+        run: |
+          $output = & target/debug/pwds-strike-launcher-ui.exe --check-local-fixture 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0) { throw 'production-shaped UI accepted fixture flag' }
+          if ($output -notmatch 'usage: pwds-strike-launcher-ui') { throw 'unexpected fixture rejection: ' + $output }
