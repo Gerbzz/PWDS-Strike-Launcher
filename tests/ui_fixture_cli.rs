@@ -25,23 +25,47 @@ fn checked_ui_fixture_requires_exact_explicit_hash_without_creating_root() {
     let mut release = serde_json::json!({
         "version": "0.5.0", "archive": archive, "sha256": hash, "bytes": bytes
     });
-    fs::write(&spec, serde_json::to_vec(&serde_json::json!({
-        "schema": 1, "releases": [release.clone()]
-    })).unwrap()).unwrap();
+    fs::write(
+        &spec,
+        serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "releases": [release.clone()]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let valid = Command::new(env!("CARGO_BIN_EXE_pwds-strike-launcher-ui"))
-        .args(["--check-local-fixture", spec.to_str().unwrap(), root.to_str().unwrap()])
-        .output().unwrap();
-    assert!(valid.status.success(), "{}", String::from_utf8_lossy(&valid.stderr));
+        .args([
+            "--check-local-fixture",
+            spec.to_str().unwrap(),
+            root.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        valid.status.success(),
+        "{}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
     assert!(String::from_utf8_lossy(&valid.stdout).contains("GridStrike 0.5.0"));
     assert!(!root.exists(), "a check must not create install state");
 
     release["sha256"] = serde_json::json!("0".repeat(64));
-    fs::write(&spec, serde_json::to_vec(&serde_json::json!({
-        "schema": 1, "releases": [release]
-    })).unwrap()).unwrap();
+    fs::write(
+        &spec,
+        serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "releases": [release]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let invalid = Command::new(env!("CARGO_BIN_EXE_pwds-strike-launcher-ui"))
-        .args(["--check-local-fixture", spec.to_str().unwrap(), root.to_str().unwrap()])
-        .output().unwrap();
+        .args([
+            "--check-local-fixture",
+            spec.to_str().unwrap(),
+            root.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
     assert!(!invalid.status.success());
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("fixture SHA-256 mismatch"));
     assert!(!root.exists());
@@ -68,13 +92,43 @@ fn local_ui_fixture_runs_install_update_and_rollback_in_isolated_root() {
 
     for expected in ["0.5.0", "0.5.1"] {
         let output = Command::new(env!("CARGO_BIN_EXE_pwds-strike-launcher-ui"))
-            .args(["--local-fixture-install", spec.to_str().unwrap(), root.to_str().unwrap()])
-            .output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            .args([
+                "--local-fixture-install",
+                spec.to_str().unwrap(),
+                root.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(String::from_utf8_lossy(&output.stdout).contains(expected));
-        assert_eq!(InstallRoot::open(&root).unwrap().state().unwrap().receipt("gridstrike").unwrap().version, expected);
+        assert_eq!(
+            InstallRoot::open(&root)
+                .unwrap()
+                .state()
+                .unwrap()
+                .receipt("gridstrike")
+                .unwrap()
+                .version,
+            expected
+        );
     }
     assert!(InstallRoot::open(&root).unwrap().can_rollback("gridstrike"));
-    InstallRoot::open(&root).unwrap().rollback("gridstrike").unwrap();
-    assert_eq!(InstallRoot::open(&root).unwrap().state().unwrap().receipt("gridstrike").unwrap().version, "0.5.0");
+    InstallRoot::open(&root)
+        .unwrap()
+        .rollback("gridstrike")
+        .unwrap();
+    assert_eq!(
+        InstallRoot::open(&root)
+            .unwrap()
+            .state()
+            .unwrap()
+            .receipt("gridstrike")
+            .unwrap()
+            .version,
+        "0.5.0"
+    );
 }
