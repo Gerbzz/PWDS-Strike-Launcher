@@ -65,12 +65,15 @@ Apache license blobs also match those found at other pinned egui commits in
 The cloned ArtCraft reference is at commit `3fd2d56999fa00a7b90f159cb686a5fc64347e7e`.
 Its own `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`, and `ATTRIBUTION.md` were
 inspected. The `NOTICE` expressly excludes ArtCraft marks from the code
-license. A mechanical comparison of all four PWDS Rust source files against
-the 73 ArtCraft Rust files found no substantive six-line exact code block.
-The only 24-token matches were routine Rust argument parsing and egui UI
-calls. This scan did not identify copied launcher source requiring a donor
-notice. It is not proof of independent authorship or a substitute for a
-human code-provenance review. PWDS assets contain PWDS branding rather than
+license. The mechanical source comparison was rerun against PWDS revision
+`5fdea6c032006e15fc1e36b27e93f2ff25a31262`, including these five files:
+`src/installer.rs`, `src/lib.rs`, `src/main.rs`, `src/ui_fixture.rs`, and
+`src/bin/ui.rs`. Each was compared with 73 ArtCraft Rust files. The few
+six-line-or-longer exact blocks contain only braces, closures, and a routine
+egui spacing call; the 24-token overlaps are routine Rust argument parsing
+and egui UI syntax. The scan did not identify copied launcher source requiring
+a donor notice. It is not proof of independent authorship or a substitute for
+a human code-provenance review. PWDS assets contain PWDS branding rather than
 ArtCraft marks.
 
 The pinned GridStrike app has a separately documented GridCraft donor and its
