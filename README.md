@@ -8,6 +8,12 @@ The launcher brings the Strike family into a single catalog. Browse each app's p
 
 **Status:** installer development preview. The embedded release manifest is empty, so no public Strike app installation is enabled. No downloadable public launcher or accepted clean-machine installer is offered here yet.
 
+## Rust direction and migration status
+
+- **Target:** Build the Rust suite launcher on the selected Craft Launcher foundation, carrying forward safe installation, receipt verification, update, rollback, and uninstall behavior.
+- **Current implementation:** Published `main` is still the first-party Rust CLI and eframe/egui launcher described by [`Cargo.toml`](Cargo.toml); Craft Launcher adoption has not been integrated. The bundled public release manifest remains empty.
+- **Remaining migration:** Verify and integrate the selected donor foundation without losing existing installer safeguards, then populate only verified release artifacts and test clean-machine installation. The current custom preview is not the completed foundation migration or an installable public suite.
+
 ## Native UI preview
 
 These are inspected captures of the real Rust/egui launcher window from [merged PR #1](https://github.com/Gerbzz/PWDS-Strike-Launcher/pull/1), source commit [`bde73be`](https://github.com/Gerbzz/PWDS-Strike-Launcher/commit/bde73be12529557619ac8abf5cf98e1a2595dc32). They were taken on 2026-10-15 on a Linux virtual display with software OpenGL. These images are development previews, not a downloadable release.
